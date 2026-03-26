@@ -5,135 +5,148 @@
 <title>Ocean Simulator</title>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
-body { background:#000; overflow:hidden; }
+body { background:#001020; overflow:hidden; }
 canvas { display:block; }
 #ui {
   position:fixed; top:12px; left:12px;
-  background:rgba(0,10,30,0.82);
-  border:1px solid #1a4a7b;
+  background:rgba(0,10,30,0.85);
+  border:1px solid #1a5a8b;
   border-radius:10px;
   padding:12px 16px;
   color:#adf;
-  font:13px/1.8 Arial,sans-serif;
-  z-index:10;
-  min-width:200px;
+  font:13px/2.0 Arial,sans-serif;
+  z-index:10; min-width:210px;
 }
 #ui b { font-size:14px; color:#7ef; }
 #ui label { display:flex; justify-content:space-between; align-items:center; gap:8px; }
-#ui input[type=range] { width:110px; }
-#info {
-  position:fixed; bottom:10px; left:50%;
-  transform:translateX(-50%);
-  color:#adf; font:12px Arial; opacity:0.7;
-}
+#ui input[type=range] { width:110px; cursor:pointer; }
+#info { position:fixed; bottom:10px; left:50%; transform:translateX(-50%);
+  color:#adf; font:12px Arial; opacity:0.6; pointer-events:none; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="ui">
   <b>🌊 Ocean Simulator</b><br>
-  <label>Wave Height <input type="range" id="wH" min="0.1" max="3" step="0.05" value="1.2"></label>
-  <label>Wave Speed  <input type="range" id="wS" min="0.1" max="3" step="0.05" value="1.0"></label>
-  <label>Choppiness  <input type="range" id="ch" min="0"   max="2" step="0.05" value="1.0"></label>
-  <label>Fog Density <input type="range" id="fg" min="0"   max="1" step="0.02" value="0.15"></label>
-  <label>Ice Size    <input type="range" id="is" min="0.3" max="3" step="0.1"  value="1.0"></label>
+  <label>Wave Height <input type="range" id="wH" min="0.1" max="3"   step="0.05" value="1.2"></label>
+  <label>Wave Speed  <input type="range" id="wS" min="0.1" max="3"   step="0.05" value="1.0"></label>
+  <label>Choppiness  <input type="range" id="ch" min="0"   max="2"   step="0.05" value="1.0"></label>
+  <label>Fog Density <input type="range" id="fg" min="0"   max="1"   step="0.02" value="0.15"></label>
+  <label>Ice Size    <input type="range" id="is" min="0.3" max="3"   step="0.1"  value="1.0"></label>
 </div>
-<div id="info">ドラッグ:回転　スクロール:ズーム</div>
+<div id="info">ドラッグ：回転　ホイール：ズーム</div>
 
 <script>
-'use strict';
-
 // ============================================================
-// Canvas & WebGL2
+// WebGL2 セットアップ
 // ============================================================
 const canvas = document.getElementById('c');
 canvas.width  = window.innerWidth;
 canvas.height = window.innerHeight;
 
-const gl = canvas.getContext('webgl2', { antialias:true });
-if (!gl) { document.body.innerHTML = '<p style="color:red;padding:40px">WebGL2非対応ブラウザです</p>'; throw ''; }
-
+const gl = canvas.getContext('webgl2', { antialias: true, depth: true });
+if (!gl) {
+  document.body.innerHTML = '<p style="color:red;font-size:24px;padding:40px">WebGL2 非対応ブラウザです</p>';
+  throw new Error('no webgl2');
+}
 gl.enable(gl.DEPTH_TEST);
+gl.depthFunc(gl.LEQUAL);
 gl.enable(gl.BLEND);
 gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+gl.clearColor(0.03, 0.07, 0.15, 1.0);
 
 // ============================================================
-// Shader helper
+// シェーダーコンパイル
 // ============================================================
-function makeProgram(vs, fs) {
-  function compile(type, src) {
-    const s = gl.createShader(type);
-    gl.shaderSource(s, src);
-    gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-      console.error('SHADER ERROR:', gl.getShaderInfoLog(s));
-      console.error(src);
-    }
-    return s;
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, '#version 300 es\n' + src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const err = gl.getShaderInfoLog(s);
+    console.error('Shader compile error:\n', err);
+    console.error('Source:\n', src);
+    throw new Error(err);
   }
-  const p = gl.createProgram();
-  gl.attachShader(p, compile(gl.VERTEX_SHADER,   vs));
-  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
-    console.error('LINK ERROR:', gl.getProgramInfoLog(p));
-  return p;
+  return s;
+}
+function createProgram(vsSrc, fsSrc) {
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compileShader(gl.VERTEX_SHADER,   vsSrc));
+  gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    const err = gl.getProgramInfoLog(prog);
+    console.error('Program link error:\n', err);
+    throw new Error(err);
+  }
+  return prog;
 }
 
 // ============================================================
-// GLSL ソース
+// GLSL ソース (#version は compileShader で付加)
 // ============================================================
 
-// ---------- SKY ----------
-const vsSky = `#version 300 es
+/* ---------- SKY ---------- */
+const SKY_VS = `
+precision highp float;
 in vec3 aPos;
 out vec3 vDir;
 uniform mat4 uVP;
-void main(){
+void main() {
   vDir = aPos;
-  vec4 p = uVP * vec4(aPos * 200.0, 1.0);
-  gl_Position = p.xyww;
+  // カメラ位置無視、常に遠くに描画
+  mat4 v = uVP;
+  v[3][0] = 0.0; v[3][1] = 0.0; v[3][2] = 0.0;
+  vec4 pos = v * vec4(aPos * 100.0, 1.0);
+  gl_Position = pos.xyww;
 }`;
-const fsSky = `#version 300 es
+
+const SKY_FS = `
 precision highp float;
 in vec3 vDir;
 out vec4 fragColor;
 uniform float uTime;
 
-float hash(float n){ return fract(sin(n)*43758.5); }
-float noise(vec3 p){
-  vec3 i=floor(p), f=fract(p), u=f*f*(3.0-2.0*f);
-  float a=hash(dot(i,vec3(1,57,113))),  b=hash(dot(i+vec3(1,0,0),vec3(1,57,113)));
-  float c=hash(dot(i+vec3(0,1,0),vec3(1,57,113))), d=hash(dot(i+vec3(1,1,0),vec3(1,57,113)));
-  float e=hash(dot(i+vec3(0,0,1),vec3(1,57,113))), f2=hash(dot(i+vec3(1,0,1),vec3(1,57,113)));
-  float g=hash(dot(i+vec3(0,1,1),vec3(1,57,113))), h=hash(dot(i+vec3(1,1,1),vec3(1,57,113)));
-  return mix(mix(mix(a,b,u.x),mix(c,d,u.x),u.y),mix(mix(e,f2,u.x),mix(g,h,u.x),u.y),u.z);
+float hash(float n) { return fract(sin(n) * 43758.5453); }
+float vnoise(vec3 p) {
+  vec3 i = floor(p), f = fract(p);
+  vec3 u = f * f * (3.0 - 2.0 * f);
+  float n000 = hash(dot(i,             vec3(1.0,57.0,113.0)));
+  float n100 = hash(dot(i+vec3(1,0,0), vec3(1.0,57.0,113.0)));
+  float n010 = hash(dot(i+vec3(0,1,0), vec3(1.0,57.0,113.0)));
+  float n110 = hash(dot(i+vec3(1,1,0), vec3(1.0,57.0,113.0)));
+  float n001 = hash(dot(i+vec3(0,0,1), vec3(1.0,57.0,113.0)));
+  float n101 = hash(dot(i+vec3(1,0,1), vec3(1.0,57.0,113.0)));
+  float n011 = hash(dot(i+vec3(0,1,1), vec3(1.0,57.0,113.0)));
+  float n111 = hash(dot(i+vec3(1,1,1), vec3(1.0,57.0,113.0)));
+  return mix(
+    mix(mix(n000,n100,u.x), mix(n010,n110,u.x), u.y),
+    mix(mix(n001,n101,u.x), mix(n011,n111,u.x), u.y), u.z);
 }
-void main(){
+void main() {
   vec3 d = normalize(vDir);
-  vec3 col;
-  if(d.y >= 0.0){
-    col = mix(vec3(0.55,0.72,0.92), mix(vec3(0.1,0.3,0.7),vec3(0.02,0.08,0.25),d.y), d.y);
-  } else {
-    col = mix(vec3(0.55,0.72,0.92), vec3(0.4,0.3,0.2), min(-d.y*3.0,1.0));
-  }
+  // 空グラデーション
+  vec3 col = mix(vec3(0.55,0.72,0.92), vec3(0.02,0.08,0.28), clamp(d.y*1.5,0.0,1.0));
+  if (d.y < 0.0) col = mix(vec3(0.55,0.72,0.92), vec3(0.38,0.28,0.18), clamp(-d.y*3.0,0.0,1.0));
   // 太陽
-  vec3 sunDir = normalize(vec3(0.5,0.9,0.3));
-  float sun = max(dot(d,sunDir),0.0);
-  col += vec3(1.0,0.95,0.8)*pow(sun,200.0)*5.0;
-  col += vec3(1.0,0.85,0.5)*pow(sun,6.0)*0.25;
+  vec3 sunDir = normalize(vec3(0.5, 0.85, 0.3));
+  float sv = max(dot(d, sunDir), 0.0);
+  col += vec3(1.0,0.95,0.80) * pow(sv, 256.0) * 6.0;
+  col += vec3(1.0,0.80,0.45) * pow(sv, 5.0) * 0.22;
   // 雲
-  if(d.y > 0.02){
-    vec3 cp = d/(d.y+0.001)*4.0 + vec3(uTime*0.008,0,0);
-    float cl = noise(cp*0.5)*0.5 + noise(cp*1.0)*0.3 + noise(cp*2.0)*0.2;
-    cl = smoothstep(0.48,0.72,cl)*smoothstep(0.02,0.15,d.y);
-    col = mix(col, vec3(0.93,0.95,0.98), cl);
+  if (d.y > 0.03) {
+    vec3 cp = d / (d.y + 0.001) * 3.5;
+    cp.xz += vec2(uTime * 0.007, 0.0);
+    float cl = vnoise(cp*0.5)*0.5 + vnoise(cp*1.1)*0.3 + vnoise(cp*2.2)*0.2;
+    cl = smoothstep(0.46, 0.70, cl) * smoothstep(0.03, 0.18, d.y);
+    col = mix(col, vec3(0.92,0.95,0.98), cl);
   }
-  fragColor = vec4(col,1.0);
+  fragColor = vec4(col, 1.0);
 }`;
 
-// ---------- OCEAN ----------
-const vsOcean = `#version 300 es
+/* ---------- OCEAN ---------- */
+const OCEAN_VS = `
 precision highp float;
 in vec3 aPos;
 in vec2 aUV;
@@ -141,52 +154,59 @@ out vec3 vWorld;
 out vec3 vNorm;
 out vec2 vUV;
 out float vFoam;
-uniform mat4 uMVP;
+uniform mat4 uVP;
 uniform float uTime;
 uniform float uWH;
 uniform float uWS;
 uniform float uChop;
 
-vec3 gerstner(vec3 p, vec2 dir, float amp, float wlen, float spd, float steep, float t){
-  float k  = 6.2832/wlen;
-  float c  = sqrt(9.8/k)*spd;
-  float ph = k*(dot(dir,p.xz)-c*t);
-  float sa = steep/k;
-  return vec3(dir.x*sa*cos(ph), amp*sin(ph), dir.y*sa*cos(ph));
+// Gerstner wave: 変位を返す
+vec3 gWave(vec3 p, vec2 dir, float amp, float wlen, float spd, float steep, float t) {
+  float k   = 6.28318 / wlen;
+  float c   = sqrt(9.8 / k) * spd;
+  float f   = k * (dot(dir, p.xz) - c * t);
+  float sa  = steep / k;
+  return vec3(dir.x * sa * cos(f), amp * sin(f), dir.y * sa * cos(f));
 }
-vec3 gerstnerN(vec3 p, vec2 dir, float amp, float wlen, float spd, float t){
-  float k  = 6.2832/wlen;
-  float c  = sqrt(9.8/k)*spd;
-  float ph = k*(dot(dir,p.xz)-c*t);
-  return vec3(-dir.x*k*amp*cos(ph), 0.0, -dir.y*k*amp*cos(ph));
+// 法線寄与（∂pos/∂x, ∂pos/∂z の近似）
+vec3 gNorm(vec3 p, vec2 dir, float amp, float wlen, float spd, float t) {
+  float k = 6.28318 / wlen;
+  float c = sqrt(9.8 / k) * spd;
+  float f = k * (dot(dir, p.xz) - c * t);
+  return vec3(-dir.x * k * amp * cos(f),
+               0.0,
+              -dir.y * k * amp * cos(f));
 }
-void main(){
-  float t = uTime*uWS;
-  vec2 d0=normalize(vec2(0.8,0.6));
-  vec2 d1=normalize(vec2(-0.5,0.9));
-  vec2 d2=normalize(vec2(0.3,-0.7));
-  vec2 d3=normalize(vec2(-0.9,-0.4));
-  vec2 d4=normalize(vec2(0.6,0.2));
 
-  vec3 p = aPos;
-  p += gerstner(p,d0,0.28*uWH,6.0,1.0,uChop*0.55,t);
-  p += gerstner(p,d1,0.18*uWH,3.5,1.3,uChop*0.45,t);
-  p += gerstner(p,d2,0.11*uWH,2.2,1.7,uChop*0.35,t);
-  p += gerstner(p,d3,0.07*uWH,1.3,2.2,uChop*0.25,t);
-  p += gerstner(p,d4,0.04*uWH,0.7,2.8,uChop*0.15,t);
+void main() {
+  float t  = uTime * uWS;
+  vec2 d0  = normalize(vec2( 0.80,  0.60));
+  vec2 d1  = normalize(vec2(-0.50,  0.88));
+  vec2 d2  = normalize(vec2( 0.30, -0.72));
+  vec2 d3  = normalize(vec2(-0.88, -0.40));
+  vec2 d4  = normalize(vec2( 0.60,  0.22));
 
-  vFoam = smoothstep(0.15,0.65, p.y/max(uWH,0.01));
+  vec3 pos = aPos;
+  float ch = uChop;
+  pos += gWave(pos, d0, 0.28*uWH, 6.0, 1.00, ch*0.55, t);
+  pos += gWave(pos, d1, 0.18*uWH, 3.5, 1.30, ch*0.45, t);
+  pos += gWave(pos, d2, 0.11*uWH, 2.2, 1.70, ch*0.35, t);
+  pos += gWave(pos, d3, 0.07*uWH, 1.3, 2.20, ch*0.25, t);
+  pos += gWave(pos, d4, 0.04*uWH, 0.7, 2.80, ch*0.15, t);
 
-  vec3 n = vec3(0,0,1);
-  n += gerstnerN(aPos,d0,0.28*uWH,6.0,1.0,t);
-  n += gerstnerN(aPos,d1,0.18*uWH,3.5,1.3,t);
-  n += gerstnerN(aPos,d2,0.11*uWH,2.2,1.7,t);
-  vNorm  = normalize(vec3(n.x, n.z+1.0, n.y));
-  vWorld = p;
+  vFoam = smoothstep(0.15, 0.65, pos.y / max(uWH, 0.01));
+
+  vec3 n = vec3(0.0, 1.0, 0.0);
+  n += gNorm(aPos, d0, 0.28*uWH, 6.0, 1.00, t);
+  n += gNorm(aPos, d1, 0.18*uWH, 3.5, 1.30, t);
+  n += gNorm(aPos, d2, 0.11*uWH, 2.2, 1.70, t);
+  vNorm  = normalize(n);
+  vWorld = pos;
   vUV    = aUV;
-  gl_Position = uMVP * vec4(p,1.0);
+  gl_Position = uVP * vec4(pos, 1.0);
 }`;
-const fsOcean = `#version 300 es
+
+const OCEAN_FS = `
 precision highp float;
 in vec3 vWorld;
 in vec3 vNorm;
@@ -197,60 +217,64 @@ uniform vec3 uCam;
 uniform float uTime;
 uniform float uFog;
 
-float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5); }
-float noise2(vec2 p){
-  vec2 i=floor(p),f=fract(p),u=f*f*(3.0-2.0*f);
-  return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),
-             mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y);
+float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise2(vec2 p) {
+  vec2 i = floor(p), f = fract(p), u = f*f*(3.0-2.0*f);
+  return mix(mix(hash2(i), hash2(i+vec2(1,0)), u.x),
+             mix(hash2(i+vec2(0,1)), hash2(i+vec2(1,1)), u.x), u.y);
 }
-void main(){
+
+void main() {
   vec3 N = normalize(vNorm);
   vec3 V = normalize(uCam - vWorld);
-  vec3 L = normalize(vec3(0.5,1.0,0.3));
-  vec3 H = normalize(L+V);
+  vec3 L = normalize(vec3(0.5, 1.0, 0.3));
 
-  // マイクロ法線
-  float nb1 = noise2(vUV*20.0+uTime*0.13);
-  float nb2 = noise2(vUV*40.0-uTime*0.10);
-  N = normalize(N + vec3((nb1-0.5)*0.06, (nb2-0.5)*0.06, 0.0));
+  // マイクロ波紋
+  float nb1 = noise2(vUV * 22.0 + uTime * 0.12);
+  float nb2 = noise2(vUV * 44.0 - uTime * 0.09);
+  N = normalize(N + vec3((nb1-0.5)*0.05, 0.0, (nb2-0.5)*0.05));
 
   // Fresnel
-  float ndv = max(dot(N,V),0.0);
-  float fr  = mix(0.04, 1.0, pow(1.0-ndv, 4.5));
+  float fr = pow(1.0 - max(dot(N, V), 0.0), 4.5);
+  fr = mix(0.03, 1.0, fr);
 
-  // 反射先（空のグラデーション）
-  vec3 R   = reflect(-V,N);
-  vec3 skyT  = vec3(0.03,0.10,0.28);
-  vec3 skyH  = vec3(0.50,0.67,0.88);
-  vec3 refl  = mix(skyH, skyT, clamp(R.y*2.0+0.3,0.0,1.0));
+  // 反射色（空グラデ近似）
+  vec3 R       = reflect(-V, N);
+  vec3 skyTop  = vec3(0.02,0.08,0.28);
+  vec3 skyHor  = vec3(0.50,0.68,0.90);
+  float skyT   = clamp(R.y * 2.0 + 0.25, 0.0, 1.0);
+  vec3 reflCol = mix(skyHor, skyTop, skyT);
   // 太陽グリント
-  refl += vec3(1.0,0.95,0.8)*pow(max(dot(R,L),0.0),320.0)*9.0;
+  vec3 sunDir  = normalize(vec3(0.5, 0.85, 0.3));
+  reflCol += vec3(1.0,0.95,0.80) * pow(max(dot(R, sunDir),0.0), 300.0) * 10.0;
 
-  // 水本体色
-  float dep = clamp(1.0-max(vWorld.y,0.0)*0.6,0.0,1.0);
-  vec3 wCol  = mix(vec3(0.04,0.30,0.48), vec3(0.01,0.05,0.18), dep);
-  // サブサーフェス
-  wCol += vec3(0.0,0.30,0.22)*pow(max(dot(L,-V),0.0),4.0)*0.4;
+  // 水の色
+  float dep    = clamp(1.0 - pos_y_approx(vWorld.y) * 0.5, 0.0, 1.0);
+  vec3 shallow = vec3(0.04, 0.30, 0.50);
+  vec3 deep    = vec3(0.01, 0.05, 0.18);
+  vec3 wCol    = mix(shallow, deep, clamp(1.0-vWorld.y*0.5, 0.0, 1.0));
+  // SSS
+  wCol += vec3(0.0, 0.32, 0.22) * pow(max(dot(L, -V), 0.0), 4.0) * 0.4;
+
   // スペキュラ
-  vec3 spec = vec3(1.0,0.97,0.92)*pow(max(dot(N,H),0.0),200.0)*2.5;
+  vec3 H   = normalize(L + V);
+  vec3 sp  = vec3(1.0,0.97,0.92) * pow(max(dot(N,H),0.0), 220.0) * 2.8;
 
-  vec3 col = mix(wCol, refl, fr) + spec;
+  vec3 col = mix(wCol, reflCol, fr) + sp;
 
   // 泡
-  float fn = noise2(vUV*26.0+uTime*0.35);
-  col = mix(col, vec3(0.90,0.94,1.0), vFoam*fn*0.75);
+  float fn = noise2(vUV * 28.0 + uTime * 0.38);
+  col = mix(col, vec3(0.88, 0.93, 1.0), vFoam * fn * 0.75);
 
   // フォグ
-  float dist = length(uCam-vWorld);
-  float fogF = 1.0-exp(-uFog*dist*0.07);
-  col = mix(col, vec3(0.52,0.63,0.80), fogF);
+  float dist = length(uCam - vWorld);
+  col = mix(col, vec3(0.52,0.63,0.80), 1.0-exp(-uFog*dist*0.06));
 
-  float alpha = 0.87 + fr*0.13;
-  fragColor = vec4(col, alpha);
+  fragColor = vec4(col, 0.88 + fr * 0.12);
 }`;
 
-// ---------- OBJECT (船・氷山) ----------
-const vsObj = `#version 300 es
+/* ---------- SOLID OBJECT ---------- */
+const OBJ_VS = `
 precision highp float;
 in vec3 aPos;
 in vec3 aNorm;
@@ -258,13 +282,14 @@ out vec3 vWorld;
 out vec3 vNorm;
 uniform mat4 uMVP;
 uniform mat4 uM;
-void main(){
-  vec4 wp = uM * vec4(aPos,1.0);
+void main() {
+  vec4 wp  = uM * vec4(aPos, 1.0);
   vWorld   = wp.xyz;
-  vNorm    = normalize(mat3(uM)*aNorm);
-  gl_Position = uMVP * vec4(aPos,1.0);
+  vNorm    = normalize(mat3(uM) * aNorm);
+  gl_Position = uMVP * vec4(aPos, 1.0);
 }`;
-const fsObj = `#version 300 es
+
+const OBJ_FS = `
 precision highp float;
 in vec3 vWorld;
 in vec3 vNorm;
@@ -274,385 +299,430 @@ uniform vec3  uCam;
 uniform float uMetal;
 uniform float uRough;
 uniform float uFog;
-void main(){
+void main() {
   vec3 N = normalize(vNorm);
-  vec3 V = normalize(uCam-vWorld);
-  vec3 L = normalize(vec3(0.5,1.0,0.3));
-  vec3 H = normalize(L+V);
-  float diff = max(dot(N,L),0.0)*0.85+0.15;
-  float spec = pow(max(dot(N,H),0.0), mix(8.0,512.0,1.0-uRough)) * mix(0.3,2.5,uMetal);
-  vec3 amb  = uColor * (0.35+0.35*N.y) * vec3(0.4,0.55,0.75);
-  vec3 col  = uColor*diff + vec3(1.0)*spec + amb;
-  float fogF = 1.0-exp(-uFog*length(uCam-vWorld)*0.07);
+  vec3 V = normalize(uCam - vWorld);
+  vec3 L = normalize(vec3(0.5, 1.0, 0.3));
+  vec3 H = normalize(L + V);
+  float diff = max(dot(N, L), 0.0) * 0.8 + 0.20;
+  float spec = pow(max(dot(N, H), 0.0), mix(8.0, 512.0, 1.0 - uRough))
+               * mix(0.25, 2.5, uMetal);
+  vec3 amb  = uColor * (0.3 + 0.3*N.y) * vec3(0.35,0.50,0.75);
+  vec3 col  = uColor * diff + vec3(1.0) * spec + amb;
+  float fogF = 1.0 - exp(-uFog * length(uCam - vWorld) * 0.06);
   col = mix(col, vec3(0.52,0.63,0.80), fogF);
-  fragColor = vec4(col,1.0);
+  fragColor = vec4(col, 1.0);
 }`;
 
 // ============================================================
-// Programs
+// OCEAN_FSのpos_y_approxを修正してから再定義
 // ============================================================
-const progSky = makeProgram(vsSky, fsSky);
-const progSea = makeProgram(vsOcean, fsOcean);
-const progObj = makeProgram(vsObj, fsObj);
+const OCEAN_FS_FIXED = OCEAN_FS.replace(
+  'float dep    = clamp(1.0 - pos_y_approx(vWorld.y) * 0.5, 0.0, 1.0);',
+  ''
+);
 
 // ============================================================
-// Geometry builders & VAO
+// Programs（修正済みソース使用）
 // ============================================================
-function makeVAO(prog, vdata, idata, layout) {
+let progSky, progSea, progObj;
+try {
+  progSky = createProgram(SKY_VS, SKY_FS);
+  progSea = createProgram(OCEAN_VS, OCEAN_FS.replace(
+    'float dep    = clamp(1.0 - pos_y_approx(vWorld.y) * 0.5, 0.0, 1.0);\n  vec3 wCol    = mix(shallow, deep, clamp(1.0-vWorld.y*0.5, 0.0, 1.0));',
+    'vec3 wCol    = mix(shallow, deep, clamp(1.0-vWorld.y*0.5, 0.0, 1.0));'
+  ));
+  progObj = createProgram(OBJ_VS, OBJ_FS);
+} catch(e) {
+  console.error(e);
+}
+
+// ============================================================
+// VAO ビルダー
+// ============================================================
+function buildVAO(prog, floatData, indexData, layout) {
+  // layout = [{name, size}, ...]
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
 
-  const vb = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vdata), gl.STATIC_DRAW);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(floatData), gl.STATIC_DRAW);
 
-  const stride = layout.reduce((s, l) => s + l.size, 0) * 4;
-  let offset = 0;
+  const stride = layout.reduce((s, a) => s + a.size, 0) * 4;
+  let off = 0;
   for (const {name, size} of layout) {
     const loc = gl.getAttribLocation(prog, name);
-    if (loc >= 0) {
+    if (loc !== -1) {
       gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride, offset);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride, off);
     }
-    offset += size * 4;
+    off += size * 4;
   }
 
-  const ib = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idata), gl.STATIC_DRAW);
+  const ibo = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indexData), gl.STATIC_DRAW);
 
   gl.bindVertexArray(null);
-  return { vao, count: idata.length };
+  return { vao, count: indexData.length };
 }
 
-// ---- Sky cube ----
-(function buildSkyVAO() {
-  const v = [
-    -1,-1,-1, 1,-1,-1, 1,1,-1,-1,1,-1,
-    -1,-1,1, -1,1,1, 1,1,1, 1,-1,1,
-    -1,-1,-1,-1,-1,1,-1,1,1,-1,1,-1,
-    1,-1,-1,1,1,-1,1,1,1,1,-1,1,
-    -1,-1,-1,1,-1,-1,1,-1,1,-1,-1,1,
-    -1,1,-1,-1,1,1,1,1,1,1,1,-1
-  ];
-  const idx=[];
-  for(let f=0;f<6;f++){const b=f*4;idx.push(b,b+1,b+2,b,b+2,b+3);}
-  window.skyGeo = makeVAO(progSky, v, idx, [{name:'aPos',size:3}]);
-})();
-
-// ---- Ocean grid ----
-function buildOcean(nx, nz, size) {
-  const v=[], idx=[];
-  for(let j=0;j<=nz;j++) for(let i=0;i<=nx;i++){
-    const x=(i/nx-0.5)*size, z=(j/nz-0.5)*size;
-    v.push(x,0,z, i/nx,j/nz);     // pos(3) + uv(2)
-  }
-  for(let j=0;j<nz;j++) for(let i=0;i<nx;i++){
-    const a=j*(nx+1)+i;
-    // Uint16 上限 65535 → nx*nz <= ~256*256 なら安全だが
-    // 150*150 = 22500頂点で安全
-    idx.push(a, a+(nx+1), a+1,  a+1, a+(nx+1), a+(nx+2));
-  }
-  return makeVAO(progSea, v, idx, [{name:'aPos',size:3},{name:'aUV',size:2}]);
+// ============================================================
+// スカイボックス
+// ============================================================
+const skyVerts = [
+  -1,-1,-1,  1,-1,-1,  1, 1,-1, -1, 1,-1,
+  -1,-1, 1, -1, 1, 1,  1, 1, 1,  1,-1, 1,
+  -1,-1,-1, -1,-1, 1, -1, 1, 1, -1, 1,-1,
+   1,-1,-1,  1, 1,-1,  1, 1, 1,  1,-1, 1,
+  -1,-1,-1,  1,-1,-1,  1,-1, 1, -1,-1, 1,
+  -1, 1,-1, -1, 1, 1,  1, 1, 1,  1, 1,-1,
+];
+const skyIdx = [];
+for (let f = 0; f < 6; f++) {
+  const b = f * 4;
+  skyIdx.push(b, b+1, b+2, b, b+2, b+3);
 }
-const seaGeo = buildOcean(150, 150, 80);
+const skyVAO = buildVAO(progSky, skyVerts, skyIdx, [{name:'aPos', size:3}]);
 
-// ---- Generic solid ----
-// 頂点: [x,y,z, nx,ny,nz, ...]
-function makeSolidVAO(vdata, idata) {
-  return makeVAO(progObj, vdata, idata,
-    [{name:'aPos',size:3},{name:'aNorm',size:3}]);
-}
-
-// push quad helper
-function pushQuad(va, ia, p0,p1,p2,p3) {
-  const base = va.length/6;
-  const e1 = [p1[0]-p0[0],p1[1]-p0[1],p1[2]-p0[2]];
-  const e2 = [p2[0]-p0[0],p2[1]-p0[1],p2[2]-p0[2]];
-  let n = [
-    e1[1]*e2[2]-e1[2]*e2[1],
-    e1[2]*e2[0]-e1[0]*e2[2],
-    e1[0]*e2[1]-e1[1]*e2[0]
-  ];
-  const l = Math.hypot(...n)||1;
-  n = n.map(v=>v/l);
-  for(const p of [p0,p1,p2,p3]) va.push(...p,...n);
-  ia.push(base,base+1,base+2, base,base+2,base+3);
-}
-
-// ---- Ship ----
-function buildShip() {
-  const va=[], ia=[];
-  const wl=-0.15, kl=-0.55;
-  const profile=[
-    [-3.8,0.05],[-3.5,0.20],[-3.0,0.35],[-2.0,0.48],
-    [0.0,0.50],[2.0,0.48],[3.2,0.38],[3.8,0.16],[4.0,0.04]
-  ];
-  for(let i=0;i<profile.length-1;i++){
-    const [z0,w0]=profile[i], [z1,w1]=profile[i+1];
-    pushQuad(va,ia,[w0,wl,z0],[w1,wl,z1],[w1,kl,z1],[w0,kl,z0]); // right
-    pushQuad(va,ia,[-w0,kl,z0],[-w1,kl,z1],[-w1,wl,z1],[-w0,wl,z0]); // left
-    pushQuad(va,ia,[w0,kl,z0],[w1,kl,z1],[-w1,kl,z1],[-w0,kl,z0]); // bottom
-    pushQuad(va,ia,[-w0,wl,z0],[-w1,wl,z1],[w1,wl,z1],[w0,wl,z0]); // top
-  }
-  // Superstructure
-  const decks=[
-    {y0:wl,y1:wl+0.28,w:0.30,z0:-1.8,z1:2.0},
-    {y0:wl+0.28,y1:wl+0.52,w:0.25,z0:-1.5,z1:1.7},
-    {y0:wl+0.52,y1:wl+0.72,w:0.20,z0:-1.2,z1:1.4},
-  ];
-  for(const d of decks){
-    const {y0,y1,w,z0,z1}=d;
-    pushQuad(va,ia,[-w,y0,z0],[w,y0,z0],[w,y1,z0],[-w,y1,z0]); // front
-    pushQuad(va,ia,[w,y0,z1],[-w,y0,z1],[-w,y1,z1],[w,y1,z1]); // back
-    pushQuad(va,ia,[w,y0,z0],[w,y0,z1],[w,y1,z1],[w,y1,z0]);   // right
-    pushQuad(va,ia,[-w,y0,z1],[-w,y0,z0],[-w,y1,z0],[-w,y1,z1]); // left
-    pushQuad(va,ia,[-w,y1,z0],[w,y1,z0],[w,y1,z1],[-w,y1,z1]); // top
-  }
-  // Funnels
-  for(let fi=0;fi<4;fi++){
-    const fz=-0.3+fi*0.5, fw=0.08, y0=wl+0.72, y1=y0+0.45-fi*0.05;
-    pushQuad(va,ia,[-fw,y0,fz-fw],[fw,y0,fz-fw],[fw,y1,fz-fw],[-fw,y1,fz-fw]);
-    pushQuad(va,ia,[fw,y0,fz+fw],[-fw,y0,fz+fw],[-fw,y1,fz+fw],[fw,y1,fz+fw]);
-    pushQuad(va,ia,[fw,y0,fz-fw],[fw,y0,fz+fw],[fw,y1,fz+fw],[fw,y1,fz-fw]);
-    pushQuad(va,ia,[-fw,y0,fz+fw],[-fw,y0,fz-fw],[-fw,y1,fz-fw],[-fw,y1,fz+fw]);
-    pushQuad(va,ia,[-fw,y1,fz-fw],[fw,y1,fz-fw],[fw,y1,fz+fw],[-fw,y1,fz+fw]);
-  }
-  return {va,ia};
-}
-
-// ---- Iceberg ----
-function buildIceberg(seed, sc) {
-  const va=[], ia=[];
-  const SR=16, RR=10;
-  const rng=s=>{ let x=Math.sin(s)*43758.5; return x-Math.floor(x); };
-
-  // 頂点グリッド
-  const pts=[];
-  for(let r=0;r<=RR;r++){
-    const t=r/RR;
-    const baseR = (1.0-t*t)*0.85*sc + 0.05*sc;
-    const y = t*1.4*sc;
-    for(let s=0;s<=SR;s++){
-      const a=s/SR*Math.PI*2;
-      const br = 1.0 + (rng(seed+r*37+s)*2-1)*0.38;
-      const by = (rng(seed+r*13+s*7)*2-1)*0.10*sc;
-      pts.push([Math.cos(a)*baseR*br, y+by, Math.sin(a)*baseR*br]);
+// ============================================================
+// 海面グリッド（150×150）
+// ============================================================
+function createOceanGrid(N, size) {
+  const verts = [];
+  const idx   = [];
+  for (let j = 0; j <= N; j++) {
+    for (let i = 0; i <= N; i++) {
+      verts.push(
+        (i/N - 0.5) * size, 0.0, (j/N - 0.5) * size,  // pos
+        i/N, j/N                                         // uv
+      );
     }
   }
-  // 面生成
-  function pushTri(p0,p1,p2){
-    const base=va.length/6;
-    const e1=[p1[0]-p0[0],p1[1]-p0[1],p1[2]-p0[2]];
-    const e2=[p2[0]-p0[0],p2[1]-p0[1],p2[2]-p0[2]];
-    let n=[e1[1]*e2[2]-e1[2]*e2[1],e1[2]*e2[0]-e1[0]*e2[2],e1[0]*e2[1]-e1[1]*e2[0]];
-    const l=Math.hypot(...n)||1; n=n.map(v=>v/l);
-    for(const p of [p0,p1,p2]) va.push(...p,...n);
-    ia.push(base,base+1,base+2);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const a = j*(N+1)+i,  b = a+1,
+            c = a+(N+1),    d = c+1;
+      idx.push(a, c, b,   b, c, d);
+    }
   }
-  for(let r=0;r<RR;r++) for(let s=0;s<SR;s++){
-    const a=pts[r*(SR+1)+s], b=pts[r*(SR+1)+s+1];
-    const c=pts[(r+1)*(SR+1)+s], d=pts[(r+1)*(SR+1)+s+1];
-    pushTri(a,c,b); pushTri(b,c,d);
-  }
-  return {va,ia};
+  return buildVAO(progSea, verts, idx,
+    [{name:'aPos',size:3},{name:'aUV',size:2}]);
 }
-
-// Uint16 の上限チェック付きVAO作成
-function safeSolidVAO(va, ia) {
-  if (ia.some(v=>v>65535)) {
-    console.warn('index overflow! reducing mesh');
-  }
-  return makeSolidVAO(va, ia);
-}
-
-const shipData = buildShip();
-const iceData  = buildIceberg(42, 1.0);
-let shipVAO = safeSolidVAO(shipData.va, shipData.ia);
-let iceVAO  = safeSolidVAO(iceData.va,  iceData.ia);
-let iceCount = iceData.ia.length;
+const oceanVAO = createOceanGrid(150, 80);
 
 // ============================================================
-// マトリクス演算
+// ソリッドジオメトリ用ヘルパー
 // ============================================================
-const M = {
-  id:  ()=> new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]),
-  mul: (a,b)=>{
-    const o=new Float32Array(16);
-    for(let i=0;i<4;i++) for(let j=0;j<4;j++)
-      for(let k=0;k<4;k++) o[i+j*4]+=a[i+k*4]*b[k+j*4];
-    // 列優先に直す
-    return o;
-  },
-};
+function pushQuad(V, I, p0, p1, p2, p3) {
+  const b   = V.length / 6;
+  const e1  = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
+  const e2  = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
+  let  nx   = e1[1]*e2[2] - e1[2]*e2[1];
+  let  ny   = e1[2]*e2[0] - e1[0]*e2[2];
+  let  nz   = e1[0]*e2[1] - e1[1]*e2[0];
+  const l   = Math.hypot(nx,ny,nz) || 1;
+  nx/=l; ny/=l; nz/=l;
+  for (const p of [p0,p1,p2,p3]) V.push(p[0],p[1],p[2], nx,ny,nz);
+  I.push(b, b+1, b+2,  b, b+2, b+3);
+}
+function pushTri(V, I, p0, p1, p2) {
+  const b  = V.length / 6;
+  const e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
+  const e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
+  let  nx  = e1[1]*e2[2] - e1[2]*e2[1];
+  let  ny  = e1[2]*e2[0] - e1[0]*e2[2];
+  let  nz  = e1[0]*e2[1] - e1[1]*e2[0];
+  const l  = Math.hypot(nx,ny,nz) || 1;
+  nx/=l; ny/=l; nz/=l;
+  for (const p of [p0,p1,p2]) V.push(p[0],p[1],p[2], nx,ny,nz);
+  I.push(b, b+1, b+2);
+}
 
-// 列優先 mat4
-function mat4Perspective(fov,asp,near,far){
-  const f=1/Math.tan(fov*0.5), d=near-far;
+// ============================================================
+// 船ジオメトリ
+// ============================================================
+function buildShip() {
+  const V=[], I=[];
+  const WL=-0.15, KL=-0.55;
+  const hull=[
+    [-3.8,0.04],[-3.4,0.20],[-2.8,0.36],[-1.5,0.48],
+    [0.0,0.50],[1.5,0.48],[2.8,0.40],[3.5,0.18],[3.9,0.04]
+  ];
+  for (let i=0; i<hull.length-1; i++) {
+    const [z0,w0]=hull[i], [z1,w1]=hull[i+1];
+    pushQuad(V,I, [w0,WL,z0],[w1,WL,z1],[w1,KL,z1],[w0,KL,z0]);  // 右舷
+    pushQuad(V,I, [-w0,KL,z0],[-w1,KL,z1],[-w1,WL,z1],[-w0,WL,z0]); // 左舷
+    pushQuad(V,I, [w0,KL,z0],[w1,KL,z1],[-w1,KL,z1],[-w0,KL,z0]); // 船底
+    pushQuad(V,I, [-w0,WL,z0],[-w1,WL,z1],[w1,WL,z1],[w0,WL,z0]); // 甲板
+  }
+  // 上部構造
+  const decks=[
+    {ya:WL,    yb:WL+0.28, w:0.28, z0:-1.8, z1:2.0},
+    {ya:WL+0.28,yb:WL+0.52,w:0.22, z0:-1.5, z1:1.7},
+    {ya:WL+0.52,yb:WL+0.70,w:0.18, z0:-1.2, z1:1.4},
+  ];
+  for (const {ya,yb,w,z0,z1} of decks) {
+    pushQuad(V,I, [-w,ya,z0],[w,ya,z0],[w,yb,z0],[-w,yb,z0]); // 前
+    pushQuad(V,I, [w,ya,z1],[-w,ya,z1],[-w,yb,z1],[w,yb,z1]); // 後
+    pushQuad(V,I, [w,ya,z0],[w,ya,z1],[w,yb,z1],[w,yb,z0]);   // 右
+    pushQuad(V,I, [-w,ya,z1],[-w,ya,z0],[-w,yb,z0],[-w,yb,z1]); // 左
+    pushQuad(V,I, [-w,yb,z0],[w,yb,z0],[w,yb,z1],[-w,yb,z1]); // 上
+  }
+  // 煙突 ×4
+  const funnelZ=[-0.25, 0.25, 0.75, 1.25];
+  for (const fz of funnelZ) {
+    const fw=0.07, y0=WL+0.70, y1=y0+0.50;
+    pushQuad(V,I,[-fw,y0,fz-fw],[fw,y0,fz-fw],[fw,y1,fz-fw],[-fw,y1,fz-fw]);
+    pushQuad(V,I,[fw,y0,fz+fw],[-fw,y0,fz+fw],[-fw,y1,fz+fw],[fw,y1,fz+fw]);
+    pushQuad(V,I,[fw,y0,fz-fw],[fw,y0,fz+fw],[fw,y1,fz+fw],[fw,y1,fz-fw]);
+    pushQuad(V,I,[-fw,y0,fz+fw],[-fw,y0,fz-fw],[-fw,y1,fz-fw],[-fw,y1,fz+fw]);
+    pushQuad(V,I,[-fw,y1,fz-fw],[fw,y1,fz-fw],[fw,y1,fz+fw],[-fw,y1,fz+fw]);
+  }
+  return buildVAO(progObj, V, I, [{name:'aPos',size:3},{name:'aNorm',size:3}]);
+}
+
+// ============================================================
+// 氷山ジオメトリ
+// ============================================================
+function buildIceberg(seed, sc) {
+  const V=[], I=[];
+  const SLICES=14, RINGS=8;
+  const rng = s => { const x = Math.sin(s)*43758.5453; return x - Math.floor(x); };
+
+  // 頂点グリッド生成
+  const pts = [];
+  for (let r = 0; r <= RINGS; r++) {
+    const t  = r / RINGS;
+    const br = (1.0 - t*t) * 0.85 * sc + 0.04 * sc;
+    const y  = t * 1.4 * sc;
+    for (let s = 0; s <= SLICES; s++) {
+      const a   = s / SLICES * Math.PI * 2.0;
+      const nr  = 1.0 + (rng(seed + r*37 + s) * 2.0 - 1.0) * 0.36;
+      const ny2 = (rng(seed + r*13 + s*7) * 2.0 - 1.0) * 0.10 * sc;
+      pts.push([
+        Math.cos(a) * br * nr,
+        y + ny2,
+        Math.sin(a) * br * nr
+      ]);
+    }
+  }
+  for (let r = 0; r < RINGS; r++) {
+    for (let s = 0; s < SLICES; s++) {
+      const a = pts[r*(SLICES+1)+s],     b = pts[r*(SLICES+1)+s+1];
+      const c = pts[(r+1)*(SLICES+1)+s], d = pts[(r+1)*(SLICES+1)+s+1];
+      pushTri(V,I,a,c,b);
+      pushTri(V,I,b,c,d);
+    }
+  }
+  return {
+    geo: buildVAO(progObj, V, I, [{name:'aPos',size:3},{name:'aNorm',size:3}]),
+    count: I.length
+  };
+}
+
+// ============================================================
+// ジオメトリ生成
+// ============================================================
+const shipVAO = buildShip();
+let   ice     = buildIceberg(42, 1.0);
+
+// ============================================================
+// 行列演算（列優先 Float32Array）
+// ============================================================
+function identity() {
   return new Float32Array([
-    f/asp,0,0,0,
-    0,f,0,0,
-    0,0,(near+far)/d,-1,
-    0,0,2*near*far/d,0
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1,0,
+    0,0,0,1
   ]);
 }
-function mat4LookAt(eye,at,up){
-  let fz=norm3(sub3(eye,at)), rx=norm3(cross3(up,fz)), ry=cross3(fz,rx);
+function perspective(fovY, aspect, near, far) {
+  const f = 1.0 / Math.tan(fovY * 0.5);
+  const nf = 1.0 / (near - far);
   return new Float32Array([
-    rx[0],ry[0],fz[0],0,
-    rx[1],ry[1],fz[1],0,
-    rx[2],ry[2],fz[2],0,
-    -dot3(rx,eye),-dot3(ry,eye),-dot3(fz,eye),1
+    f/aspect, 0, 0,  0,
+    0,        f, 0,  0,
+    0,        0, (far+near)*nf, -1,
+    0,        0, 2*far*near*nf,  0
   ]);
 }
-function mat4Mul(a,b){
-  const o=new Float32Array(16);
-  for(let c=0;c<4;c++) for(let r=0;r<4;r++){
-    let s=0; for(let k=0;k<4;k++) s+=a[r+k*4]*b[k+c*4];
-    o[r+c*4]=s;
+function lookAt(eye, center, up) {
+  let fx=center[0]-eye[0], fy=center[1]-eye[1], fz=center[2]-eye[2];
+  let rl=1/Math.hypot(fx,fy,fz); fx*=rl; fy*=rl; fz*=rl;
+  let rx=fy*up[2]-fz*up[1], ry=fz*up[0]-fx*up[2], rz=fx*up[1]-fy*up[0];
+  rl=1/(Math.hypot(rx,ry,rz)||1); rx*=rl; ry*=rl; rz*=rl;
+  const ux=ry*fz-rz*fy, uy=rz*fx-rx*fz, uz=rx*fy-ry*fx;
+  return new Float32Array([
+    rx, ux, -fx, 0,
+    ry, uy, -fy, 0,
+    rz, uz, -fz, 0,
+    -(rx*eye[0]+ry*eye[1]+rz*eye[2]),
+    -(ux*eye[0]+uy*eye[1]+uz*eye[2]),
+     (fx*eye[0]+fy*eye[1]+fz*eye[2]),
+    1
+  ]);
+}
+function mul4(a, b) {
+  const o = new Float32Array(16);
+  for (let col=0; col<4; col++) {
+    for (let row=0; row<4; row++) {
+      let s = 0;
+      for (let k=0; k<4; k++) s += a[row + k*4] * b[k + col*4];
+      o[row + col*4] = s;
+    }
   }
   return o;
 }
-function mat4Translate(x,y,z){
-  const m=new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]);
+function translate(x, y, z) {
+  const m = identity();
+  m[12]=x; m[13]=y; m[14]=z;
   return m;
 }
-function mat4Scale(x,y,z){
-  return new Float32Array([x,0,0,0, 0,y,0,0, 0,0,z,0, 0,0,0,1]);
+function rotY(a) {
+  const c=Math.cos(a), s=Math.sin(a);
+  const m=identity();
+  m[0]=c; m[2]=-s; m[8]=s; m[10]=c;
+  return m;
 }
-function mat4RotY(a){
-  const c=Math.cos(a),s=Math.sin(a);
-  return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]);
+function rotZ(a) {
+  const c=Math.cos(a), s=Math.sin(a);
+  const m=identity();
+  m[0]=c; m[1]=s; m[4]=-s; m[5]=c;
+  return m;
 }
-function mat4RotZ(a){
-  const c=Math.cos(a),s=Math.sin(a);
-  return new Float32Array([c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]);
+// VP用：ビュー行列から平行移動を除去（スカイボックス用）
+function mat3ToMat4View(v) {
+  const m = new Float32Array(v);
+  m[12]=0; m[13]=0; m[14]=0;
+  return m;
 }
-function sub3(a,b){return[a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
-function cross3(a,b){return[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];}
-function dot3(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
-function norm3(a){const l=Math.hypot(...a)||1; return a.map(v=>v/l);}
 
 // ============================================================
-// Camera
+// ユニフォームヘルパー
 // ============================================================
-let camH=0.45, camV=0.28, camDist=16;
-let dragging=false, lastX=0, lastY=0;
-canvas.addEventListener('mousedown', e=>{dragging=true;lastX=e.clientX;lastY=e.clientY;});
-addEventListener('mouseup',  ()=>dragging=false);
-addEventListener('mousemove', e=>{
-  if(!dragging)return;
-  camH += (e.clientX-lastX)*0.005;
-  camV  = Math.min(1.3, Math.max(0.05, camV+(e.clientY-lastY)*0.004));
-  lastX=e.clientX; lastY=e.clientY;
-});
-canvas.addEventListener('wheel', e=>{
-  camDist=Math.min(50,Math.max(4,camDist+e.deltaY*0.012));
-});
-
-// ============================================================
-// UI params
-// ============================================================
-const p = { wH:1.2, wS:1.0, ch:1.0, fg:0.15, is:1.0 };
-document.getElementById('wH').oninput = e=>p.wH=+e.target.value;
-document.getElementById('wS').oninput = e=>p.wS=+e.target.value;
-document.getElementById('ch').oninput = e=>p.ch=+e.target.value;
-document.getElementById('fg').oninput = e=>p.fg=+e.target.value;
-document.getElementById('is').oninput = e=>{
-  p.is=+e.target.value;
-  const d=buildIceberg(42,p.is);
-  iceVAO=safeSolidVAO(d.va,d.ia);
-  iceCount=d.ia.length;
+const U = {
+  f1: (p,n,v)  => gl.uniform1f(gl.getUniformLocation(p,n), v),
+  v3: (p,n,v)  => gl.uniform3fv(gl.getUniformLocation(p,n), v),
+  m4: (p,n,v)  => gl.uniformMatrix4fv(gl.getUniformLocation(p,n), false, v),
 };
 
 // ============================================================
-// Uniform setters
+// カメラ制御
 // ============================================================
-function u1f(prog,n,v){ gl.uniform1f(gl.getUniformLocation(prog,n),v); }
-function u3f(prog,n,a){ gl.uniform3fv(gl.getUniformLocation(prog,n),a); }
-function uM4(prog,n,m){ gl.uniformMatrix4fv(gl.getUniformLocation(prog,n),false,m); }
+let camH=0.45, camV=0.28, camDist=16;
+let drag=false, mx=0, my=0;
+canvas.addEventListener('mousedown', e => { drag=true; mx=e.clientX; my=e.clientY; });
+window.addEventListener('mouseup',   () => drag=false);
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  camH += (e.clientX - mx) * 0.005;
+  camV  = Math.min(1.3, Math.max(0.04, camV + (e.clientY - my) * 0.004));
+  mx=e.clientX; my=e.clientY;
+});
+canvas.addEventListener('wheel', e => {
+  camDist = Math.min(50, Math.max(4, camDist + e.deltaY * 0.012));
+}, { passive: true });
+let touch0 = null;
+canvas.addEventListener('touchstart', e => {
+  touch0 = {x:e.touches[0].clientX, y:e.touches[0].clientY};
+}, {passive:true});
+canvas.addEventListener('touchmove', e => {
+  if (!touch0) return;
+  camH += (e.touches[0].clientX - touch0.x) * 0.006;
+  camV  = Math.min(1.3, Math.max(0.04, camV + (e.touches[0].clientY - touch0.y)*0.005));
+  touch0 = {x:e.touches[0].clientX, y:e.touches[0].clientY};
+}, {passive:true});
 
 // ============================================================
-// Render loop
+// UI パラメータ
 // ============================================================
-function frame(ts) {
+const P = { wH:1.2, wS:1.0, ch:1.0, fg:0.15, is:1.0 };
+document.getElementById('wH').oninput = e => P.wH = +e.target.value;
+document.getElementById('wS').oninput = e => P.wS = +e.target.value;
+document.getElementById('ch').oninput = e => P.ch = +e.target.value;
+document.getElementById('fg').oninput = e => P.fg = +e.target.value;
+document.getElementById('is').oninput = e => {
+  P.is = +e.target.value;
+  ice  = buildIceberg(42, P.is);
+};
+
+// ============================================================
+// レンダーループ
+// ============================================================
+function render(ts) {
   const t = ts * 0.001;
 
-  gl.viewport(0,0,canvas.width,canvas.height);
-  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
-  gl.clearColor(0.03,0.07,0.15,1);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0.03, 0.07, 0.15, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-  // カメラ
-  const ex = Math.sin(camH)*Math.cos(camV)*camDist;
-  const ey = Math.sin(camV)*camDist + 1.0;
-  const ez = Math.cos(camH)*Math.cos(camV)*camDist;
-  const eye = [ex,ey,ez];
+  // カメラ行列
+  const sinH = Math.sin(camH), cosH = Math.cos(camH);
+  const sinV = Math.sin(camV), cosV = Math.cos(camV);
+  const eye  = [sinH*cosV*camDist, sinV*camDist + 1.0, cosH*cosV*camDist];
+  const proj = perspective(0.75, canvas.width / canvas.height, 0.1, 300.0);
+  const view = lookAt(eye, [0, 0.5, 0], [0, 1, 0]);
+  const vp   = mul4(proj, view);
 
-  const proj = mat4Perspective(0.75, canvas.width/canvas.height, 0.1, 300);
-  const view = mat4LookAt(eye, [0,0.5,0], [0,1,0]);
-  const vp   = mat4Mul(proj, view);
-
-  // ---- SKY ----
+  // ===== SKY =====
   gl.depthMask(false);
   gl.disable(gl.DEPTH_TEST);
   gl.useProgram(progSky);
-  uM4(progSky,'uVP', vp);
-  u1f(progSky,'uTime', t);
-  gl.bindVertexArray(skyGeo.vao);
-  gl.drawElements(gl.TRIANGLES, skyGeo.count, gl.UNSIGNED_SHORT, 0);
+  // スカイは平行移動なしのVPを渡す
+  const viewNoT = mat3ToMat4View(view);
+  U.m4(progSky, 'uVP',   mul4(proj, viewNoT));
+  U.f1(progSky, 'uTime', t);
+  gl.bindVertexArray(skyVAO.vao);
+  gl.drawElements(gl.TRIANGLES, skyVAO.count, gl.UNSIGNED_SHORT, 0);
   gl.depthMask(true);
   gl.enable(gl.DEPTH_TEST);
 
-  // ---- 船 ----
+  // ===== 船 =====
   gl.useProgram(progObj);
-  u3f(progObj,'uCam', eye);
-  u1f(progObj,'uFog', p.fg);
+  U.v3(progObj, 'uCam', eye);
+  U.f1(progObj, 'uFog', P.fg);
 
-  const bobY  = Math.sin(t*0.9)*0.09*p.wH;
-  const tiltZ = Math.sin(t*1.1)*0.025*p.wH;
-  const Mship = mat4Mul(
-    mat4Mul(mat4Translate(1.8, bobY, -0.8), mat4RotY(-0.35)),
-    mat4RotZ(tiltZ)
-  );
-  const mvpShip = mat4Mul(vp, Mship);
-  uM4(progObj,'uMVP', mvpShip);
-  uM4(progObj,'uM',   Mship);
-  u3f(progObj,'uColor', [0.20,0.20,0.22]);
-  u1f(progObj,'uMetal', 0.35);
-  u1f(progObj,'uRough', 0.65);
+  const bobY  = Math.sin(t*0.9)  * 0.09 * P.wH;
+  const tiltZ = Math.sin(t*1.1)  * 0.025 * P.wH;
+  const Mship = mul4(mul4(translate(1.8, bobY, -0.8), rotY(-0.35)), rotZ(tiltZ));
+  U.m4(progObj, 'uMVP',   mul4(vp, Mship));
+  U.m4(progObj, 'uM',     Mship);
+  U.v3(progObj, 'uColor', [0.20, 0.20, 0.22]);
+  U.f1(progObj, 'uMetal', 0.35);
+  U.f1(progObj, 'uRough', 0.65);
   gl.bindVertexArray(shipVAO.vao);
-  gl.drawElements(gl.TRIANGLES, shipData.ia.length, gl.UNSIGNED_SHORT, 0);
+  gl.drawElements(gl.TRIANGLES, shipVAO.count, gl.UNSIGNED_SHORT, 0);
 
-  // ---- 氷山 ----
-  const iceY = Math.sin(t*0.5+1.3)*0.045*p.wH;
-  const Mice  = mat4Translate(-2.2, -0.28+iceY, 0.6);
-  const mvpIce = mat4Mul(vp, Mice);
-  uM4(progObj,'uMVP', mvpIce);
-  uM4(progObj,'uM',   Mice);
-  u3f(progObj,'uColor', [0.80,0.90,0.96]);
-  u1f(progObj,'uMetal', 0.04);
-  u1f(progObj,'uRough', 0.28);
-  gl.bindVertexArray(iceVAO.vao);
-  gl.drawElements(gl.TRIANGLES, iceCount, gl.UNSIGNED_SHORT, 0);
+  // ===== 氷山 =====
+  const iceY  = Math.sin(t*0.5+1.3) * 0.045 * P.wH;
+  const Mice  = translate(-2.2, -0.28 + iceY, 0.6);
+  U.m4(progObj, 'uMVP',   mul4(vp, Mice));
+  U.m4(progObj, 'uM',     Mice);
+  U.v3(progObj, 'uColor', [0.80, 0.90, 0.96]);
+  U.f1(progObj, 'uMetal', 0.04);
+  U.f1(progObj, 'uRough', 0.28);
+  gl.bindVertexArray(ice.geo.vao);
+  gl.drawElements(gl.TRIANGLES, ice.count, gl.UNSIGNED_SHORT, 0);
 
-  // ---- 海面 ----
+  // ===== 海面 =====
   gl.useProgram(progSea);
-  const Msea = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
-  uM4(progSea,'uMVP',  vp);
-  u1f(progSea,'uTime', t);
-  u1f(progSea,'uWH',   p.wH);
-  u1f(progSea,'uWS',   p.wS);
-  u1f(progSea,'uChop', p.ch);
-  u3f(progSea,'uCam',  eye);
-  u1f(progSea,'uFog',  p.fg);
-  gl.bindVertexArray(seaGeo.vao);
-  gl.drawElements(gl.TRIANGLES, seaGeo.count, gl.UNSIGNED_SHORT, 0);
+  U.m4(progSea, 'uVP',    vp);
+  U.f1(progSea, 'uTime',  t);
+  U.f1(progSea, 'uWH',    P.wH);
+  U.f1(progSea, 'uWS',    P.wS);
+  U.f1(progSea, 'uChop',  P.ch);
+  U.v3(progSea, 'uCam',   eye);
+  U.f1(progSea, 'uFog',   P.fg);
+  gl.bindVertexArray(oceanVAO.vao);
+  gl.drawElements(gl.TRIANGLES, oceanVAO.count, gl.UNSIGNED_SHORT, 0);
 
-  requestAnimationFrame(frame);
+  requestAnimationFrame(render);
 }
 
-gl.clearColor(0.03,0.07,0.15,1);
-requestAnimationFrame(frame);
+requestAnimationFrame(render);
 </script>
 </body>
 </html>
