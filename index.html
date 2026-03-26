@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Ocean Fluid Simulator - WebGPU</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    font-family: 'Arial', sans-serif;
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    border: 1px solid #1a4a6b;
+    box-shadow: 0 0 40px #0066aa44;
+  }
+  #ui {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    color: #7dd;
+    font-size: 13px;
+    background: rgba(0,10,30,0.7);
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid #1a4a6b;
+    z-index: 10;
+  }
+  #ui label { display: block; margin: 4px 0; cursor: pointer; }
+  #ui input[type=range] { width: 120px; vertical-align: middle; }
+  #fallback {
+    display:none;
+    color: #f88;
+    font-size: 18px;
+    text-align: center;
+    padding: 40px;
+  }
+</style>
+</head>
+<body>
+<div id="ui">
+  <b>🌊 Ocean Simulator</b><br>
+  <label>Wave Height <input type="range" id="waveH" min="0.1" max="3.0" step="0.05" value="1.2"></label>
+  <label>Wave Speed  <input type="range" id="waveS" min="0.1" max="3.0" step="0.05" value="1.0"></label>
+  <label>Wind Dir    <input type="range" id="windD" min="0"   max="6.28" step="0.05" value="0.4"></label>
+  <label>Choppiness  <input type="range" id="chop"  min="0"   max="2.0" step="0.05" value="1.2"></label>
+  <label>Fog Density <input type="range" id="fogD"  min="0"   max="1.0" step="0.02" value="0.18"></label>
+  <label>Ice Size    <input type="range" id="iceS"  min="0.2" max="3.0" step="0.1"  value="1.0"></label>
+</div>
+<canvas id="c"></canvas>
+<div id="fallback">WebGL2が必要です。ブラウザを更新してください。</div>
+
+<script id="vsOcean" type="x-shader/vertex">
+#version 300 es
+precision highp float;
+
+uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform float uTime;
+uniform float uWaveH;
+uniform float uWaveS;
+uniform float uWindDir;
+uniform float uChop;
+
+in vec3 aPos;
+in vec2 aUV;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+out float vFoam;
+
+// Gerstner Wave
+vec3 gerstner(vec3 p, vec2 dir, float amp, float wlen, float speed, float steep, float t) {
+  float k = 6.28318 / wlen;
+  float c = sqrt(9.8 / k) * speed;
+  float f = k * (dot(dir, p.xz) - c * t);
+  float a = steep / k;
+  return vec3(
+    dir.x * a * cos(f),
+    amp   * sin(f),
+    dir.y * a * cos(f)
+  );
+}
+
+vec3 gerstnerNormal(vec3 p, vec2 dir, float amp, float wlen, float speed, float t) {
+  float k = 6.28318 / wlen;
+  float c = sqrt(9.8 / k) * speed;
+  float f = k * (dot(dir, p.xz) - c * t);
+  return vec3(
+    -dir.x * k * amp * cos(f),
+    -dir.y * k * amp * cos(f),
+    1.0
+  );
+}
+
+void main() {
+  float t   = uTime * uWaveS;
+  float wd  = uWindDir;
+  vec2 d0 = normalize(vec2(cos(wd),       sin(wd)));
+  vec2 d1 = normalize(vec2(cos(wd+0.8),   sin(wd+0.8)));
+  vec2 d2 = normalize(vec2(cos(wd-0.5),   sin(wd-0.5)));
+  vec2 d3 = normalize(vec2(cos(wd+1.3),   sin(wd+1.3)));
+  vec2 d4 = normalize(vec2(cos(wd-1.1),   sin(wd-1.1)));
+
+  vec3 pos = aPos;
+  pos += gerstner(pos, d0, 0.30*uWaveH, 6.0,  1.0,  uChop*0.6, t);
+  pos += gerstner(pos, d1, 0.18*uWaveH, 3.5,  1.3,  uChop*0.5, t);
+  pos += gerstner(pos, d2, 0.12*uWaveH, 2.0,  1.7,  uChop*0.4, t);
+  pos += gerstner(pos, d3, 0.07*uWaveH, 1.2,  2.1,  uChop*0.3, t);
+  pos += gerstner(pos, d4, 0.04*uWaveH, 0.7,  2.6,  uChop*0.2, t);
+
+  // foam where wave is high
+  vFoam = smoothstep(0.2, 0.7, pos.y / uWaveH);
+
+  // normals (sum of partial derivatives)
+  vec3 n  = vec3(0,0,1);
+  n += gerstnerNormal(aPos, d0, 0.30*uWaveH, 6.0,  1.0, t);
+  n += gerstnerNormal(aPos, d1, 0.18*uWaveH, 3.5,  1.3, t);
+  n += gerstnerNormal(aPos, d2, 0.12*uWaveH, 2.0,  1.7, t);
+  vNormal   = normalize(mat3(uModel) * vec3(n.x, n.z, n.y));
+  vWorldPos = (uModel * vec4(pos, 1.0)).xyz;
+  vUV       = aUV;
+
+  gl_Position = uMVP * vec4(pos, 1.0);
+}
+</script>
+
+<script id="fsOcean" type="x-shader/fragment">
+#version 300 es
+precision highp float;
+
+uniform float uTime;
+uniform vec3  uCamPos;
+uniform float uFogDensity;
+uniform samplerCube uSkybox;
+
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+in float vFoam;
+
+out vec4 fragColor;
+
+// Hash / noise for micro-details
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453);
+}
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),
+             mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y);
+}
+
+void main() {
+  vec3 N = normalize(vNormal);
+  vec3 V = normalize(uCamPos - vWorldPos);
+  vec3 L = normalize(vec3(0.6, 1.0, 0.4));
+
+  // micro-normal bump
+  float n1 = noise(vUV*18.0 + uTime*0.12);
+  float n2 = noise(vUV*36.0 - uTime*0.09);
+  N = normalize(N + vec3((n1-0.5)*0.08, 0.0, (n2-0.5)*0.08));
+
+  // Fresnel
+  float fresnel = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+  fresnel = mix(0.02, 1.0, fresnel);
+
+  // Reflection
+  vec3 R = reflect(-V, N);
+  // Sky gradient for reflection (fake)
+  vec3 skyTop    = vec3(0.05, 0.12, 0.30);
+  vec3 skyHoriz  = vec3(0.40, 0.55, 0.75);
+  vec3 skyColor  = mix(skyHoriz, skyTop, clamp(R.y*2.0+0.2, 0.0, 1.0));
+  // Sun glint
+  float sun  = pow(max(dot(R, L), 0.0), 320.0) * 8.0;
+  skyColor  += vec3(1.0, 0.95, 0.8) * sun;
+
+  // Refraction (fake deep water color)
+  vec3 deepColor    = vec3(0.01, 0.05, 0.18);
+  vec3 shallowColor = vec3(0.03, 0.28, 0.45);
+  float depth = clamp(1.0 - vWorldPos.y * 0.5, 0.0, 1.0);
+  vec3 waterColor = mix(shallowColor, deepColor, depth);
+
+  // Subsurface scattering fake
+  float sss = pow(max(dot(L, -V), 0.0), 4.0) * 0.4;
+  waterColor += vec3(0.0, 0.35, 0.25) * sss;
+
+  // Specular
+  vec3 H = normalize(L + V);
+  float spec = pow(max(dot(N, H), 0.0), 180.0) * 2.5;
+  vec3 specColor = vec3(1.0, 0.97, 0.92) * spec;
+
+  // Blend reflection + refraction
+  vec3 col = mix(waterColor, skyColor, fresnel) + specColor;
+
+  // Foam
+  float foamNoise = noise(vUV * 24.0 + uTime * 0.3);
+  float foam = vFoam * foamNoise;
+  col = mix(col, vec3(0.92, 0.95, 1.0), foam * 0.7);
+
+  // Exponential fog
+  float dist = length(uCamPos - vWorldPos);
+  float fogF = 1.0 - exp(-uFogDensity * dist * 0.08);
+  vec3 fogColor = vec3(0.55, 0.65, 0.80);
+  col = mix(col, fogColor, fogF);
+
+  fragColor = vec4(col, 0.88 + fresnel * 0.12);
+}
+</script>
+
+<script id="vsObj" type="x-shader/vertex">
+#version 300 es
+precision highp float;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+in vec3 aPos;
+in vec3 aNormal;
+out vec3 vNormal;
+out vec3 vWorldPos;
+void main() {
+  vNormal   = normalize(mat3(uModel) * aNormal);
+  vWorldPos = (uModel * vec4(aPos,1.0)).xyz;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}
+</script>
+
+<script id="fsObj" type="x-shader/fragment">
+#version 300 es
+precision highp float;
+uniform vec3  uColor;
+uniform vec3  uCamPos;
+uniform float uMetallic;
+uniform float uRoughness;
+uniform float uFogDensity;
+in vec3 vNormal;
+in vec3 vWorldPos;
+out vec4 fragColor;
+
+float hash(vec2 p) { return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+
+void main() {
+  vec3 N = normalize(vNormal);
+  vec3 V = normalize(uCamPos - vWorldPos);
+  vec3 L = normalize(vec3(0.6, 1.0, 0.4));
+  vec3 H = normalize(L + V);
+
+  float diff = max(dot(N, L), 0.0) * 0.85 + 0.15;
+  float spec = pow(max(dot(N, H), 0.0), mix(8.0, 256.0, 1.0-uRoughness))
+               * mix(0.3, 2.0, uMetallic);
+
+  vec3 col = uColor * diff + vec3(1.0) * spec * (1.0 - uRoughness * 0.8);
+
+  // ambient sky
+  float amb = 0.5 + 0.5 * N.y;
+  col += uColor * vec3(0.3, 0.45, 0.6) * amb * 0.25;
+
+  // fog
+  float dist = length(uCamPos - vWorldPos);
+  float fogF = 1.0 - exp(-uFogDensity * dist * 0.08);
+  col = mix(col, vec3(0.55,0.65,0.80), fogF);
+
+  fragColor = vec4(col, 1.0);
+}
+</script>
+
+<script id="vsSky" type="x-shader/vertex">
+#version 300 es
+precision highp float;
+in vec3 aPos;
+out vec3 vDir;
+uniform mat4 uView;
+uniform mat4 uProj;
+void main() {
+  vDir = aPos;
+  vec4 pos = uProj * mat4(mat3(uView)) * vec4(aPos, 1.0);
+  gl_Position = pos.xyww;
+}
+</script>
+
+<script id="fsSky" type="x-shader/fragment">
+#version 300 es
+precision highp float;
+in vec3 vDir;
+out vec4 fragColor;
+uniform float uTime;
+
+float hash(float n) { return fract(sin(n)*43758.5453); }
+float noise3(vec3 p) {
+  vec3 i=floor(p), f=fract(p);
+  vec3 u=f*f*(3.0-2.0*f);
+  float n000=hash(dot(i,vec3(1,57,113)));
+  float n100=hash(dot(i+vec3(1,0,0),vec3(1,57,113)));
+  float n010=hash(dot(i+vec3(0,1,0),vec3(1,57,113)));
+  float n110=hash(dot(i+vec3(1,1,0),vec3(1,57,113)));
+  float n001=hash(dot(i+vec3(0,0,1),vec3(1,57,113)));
+  float n101=hash(dot(i+vec3(1,0,1),vec3(1,57,113)));
+  float n011=hash(dot(i+vec3(0,1,1),vec3(1,57,113)));
+  float n111=hash(dot(i+vec3(1,1,1),vec3(1,57,113)));
+  return mix(mix(mix(n000,n100,u.x),mix(n010,n110,u.x),u.y),
+             mix(mix(n001,n101,u.x),mix(n011,n111,u.x),u.y),u.z);
+}
+
+void main() {
+  vec3 d = normalize(vDir);
+  // gradient sky
+  vec3 skyTop    = vec3(0.04, 0.10, 0.28);
+  vec3 skyMid    = vec3(0.15, 0.40, 0.72);
+  vec3 horizon   = vec3(0.60, 0.72, 0.88);
+  vec3 glow      = vec3(0.90, 0.75, 0.50);
+
+  float y = d.y;
+  vec3 sky;
+  if (y > 0.0) {
+    sky = mix(horizon, mix(skyMid, skyTop, y), y);
+  } else {
+    sky = mix(horizon, vec3(0.35, 0.22, 0.10), -y * 2.0);
+  }
+
+  // sun
+  vec3 sunDir = normalize(vec3(0.6, 1.0, 0.4));
+  float sunD  = max(dot(d, sunDir), 0.0);
+  sky += glow * pow(sunD, 200.0) * 4.0;
+  sky += glow * pow(sunD, 8.0)   * 0.3;
+
+  // clouds
+  vec3 cp = d / (d.y + 0.01) * 5.0;
+  cp.xz += uTime * 0.01;
+  float cloud = 0.0;
+  if (d.y > 0.05) {
+    cloud = noise3(cp * 0.6) * 0.5
+          + noise3(cp * 1.2) * 0.3
+          + noise3(cp * 2.4) * 0.2;
+    cloud = smoothstep(0.45, 0.75, cloud);
+    cloud *= smoothstep(0.05, 0.25, d.y);
+  }
+  sky = mix(sky, vec3(0.92, 0.94, 0.98), cloud);
+
+  fragColor = vec4(sky, 1.0);
+}
+</script>
+
+<script>
+// =====================================================
+//  MAIN
+// =====================================================
+const canvas  = document.getElementById('c');
+const fallback = document.getElementById('fallback');
+
+const W = canvas.width  = window.innerWidth;
+const H = canvas.height = window.innerHeight;
+
+const gl = canvas.getContext('webgl2', {antialias: true, alpha: false});
+if (!gl) { canvas.style.display='none'; fallback.style.display='block'; }
+
+gl.enable(gl.DEPTH_TEST);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+// ---- helpers ----
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+function createProgram(vsId, fsId) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compileShader(gl.VERTEX_SHADER,   document.getElementById(vsId).textContent));
+  gl.attachShader(p, compileShader(gl.FRAGMENT_SHADER, document.getElementById(fsId).textContent));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    console.error(gl.getProgramInfoLog(p));
+  return p;
+}
+function getUniforms(prog, names) {
+  const u = {};
+  names.forEach(n => u[n] = gl.getUniformLocation(prog, n));
+  return u;
+}
+function createVAO(prog, geometry) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geometry.vertices), gl.STATIC_DRAW);
+  if (geometry.stride !== undefined) {
+    const s = geometry.stride * 4;
+    geometry.attribs.forEach(([name, size, off]) => {
+      const loc = gl.getAttribLocation(prog, name);
+      if (loc >= 0) {
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, size, gl.FLOAT, false, s, off * 4);
+      }
+    });
+  }
+  let ib = null;
+  if (geometry.indices) {
+    ib = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(geometry.indices), gl.STATIC_DRAW);
+  }
+  gl.bindVertexArray(null);
+  return { vao, count: geometry.indices ? geometry.indices.length : geometry.vertexCount };
+}
+
+// =====================================================
+//  PROGRAMS
+// =====================================================
+const progOcean = createProgram('vsOcean', 'fsOcean');
+const progObj   = createProgram('vsObj',   'fsObj');
+const progSky   = createProgram('vsSky',   'fsSky');
+
+// =====================================================
+//  OCEAN GRID
+// =====================================================
+function buildOcean(nx, nz, sx, sz) {
+  const verts = [], inds = [];
+  for (let j = 0; j <= nz; j++) {
+    for (let i = 0; i <= nx; i++) {
+      const x = (i/nx - 0.5) * sx;
+      const z = (j/nz - 0.5) * sz;
+      verts.push(x, 0, z,  i/nx, j/nz); // pos(3) + uv(2)
+    }
+  }
+  for (let j = 0; j < nz; j++) {
+    for (let i = 0; i < nx; i++) {
+      const a = j*(nx+1)+i,  b = a+1,
+            c = a+(nx+1),    d = c+1;
+      inds.push(a,c,b, b,c,d);
+    }
+  }
+  return { vertices: verts, indices: inds, stride: 5,
+           attribs: [['aPos',3,0],['aUV',2,3]] };
+}
+const oceanGeo = buildOcean(200, 200, 80, 80);
+const oceanVAO = createVAO(progOcean, oceanGeo);
+
+// =====================================================
+//  SKY CUBE
+// =====================================================
+function buildSkybox() {
+  const v = [
+    -1,-1,-1, 1,-1,-1, 1, 1,-1,-1, 1,-1,
+    -1,-1, 1,-1, 1, 1, 1, 1, 1, 1,-1, 1,
+    -1,-1,-1,-1, 1,-1,-1, 1, 1,-1,-1, 1,
+     1,-1,-1, 1,-1, 1, 1, 1, 1, 1, 1,-1,
+    -1,-1,-1,-1,-1, 1, 1,-1, 1, 1,-1,-1,
+    -1, 1,-1, 1, 1,-1, 1, 1, 1,-1, 1, 1
+  ];
+  const idx=[];
+  for(let f=0;f<6;f++){const b=f*4; idx.push(b,b+1,b+2, b,b+2,b+3);}
+  return { vertices: v, indices: idx, stride: 3,
+           attribs: [['aPos',3,0]] };
+}
+const skyVAO = createVAO(progSky, buildSkybox());
+
+// =====================================================
+//  3-D GEOMETRY BUILDERS
+// =====================================================
+
+// ------ Ship hull (Titanic-ish) ------
+function buildShip() {
+  const verts=[], norms=[], inds=[];
+  function addQuad(p0,p1,p2,p3) {
+    const i = verts.length/3;
+    const e1=[p1[0]-p0[0],p1[1]-p0[1],p1[2]-p0[2]];
+    const e2=[p2[0]-p0[0],p2[1]-p0[1],p2[2]-p0[2]];
+    const n=[e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
+    const l=Math.hypot(...n);
+    for(const p of [p0,p1,p2,p3]){verts.push(...p); norms.push(n[0]/l,n[1]/l,n[2]/l);}
+    inds.push(i,i+1,i+2, i,i+2,i+3);
+  }
+
+  // Hull profile cross-sections (x-z half profile, sweep along y=0 z-axis)
+  const hull=[
+    // [fwd, side, bottom] at each z station
+    // z,  width, height
+    [-3.8, 0.05, 0.10],
+    [-3.5, 0.20, 0.25],
+    [-3.0, 0.38, 0.40],
+    [-2.0, 0.50, 0.55],
+    [ 0.0, 0.52, 0.58],
+    [ 2.0, 0.50, 0.55],
+    [ 3.2, 0.42, 0.45],
+    [ 3.8, 0.18, 0.25],
+    [ 4.0, 0.05, 0.12],
+  ];
+  const yWL = -0.15;  // waterline y
+  const yKL = -0.55;  // keel y
+
+  for(let i=0;i<hull.length-1;i++){
+    const [z0,w0,h0] = hull[i];
+    const [z1,w1,h1] = hull[i+1];
+    // port side
+    addQuad([w0,yWL,z0],[w1,yWL,z1],[w1,yKL,z1],[w0,yKL,z0]);
+    // starboard side (flip)
+    addQuad([-w0,yKL,z0],[-w1,yKL,z1],[-w1,yWL,z1],[-w0,yWL,z0]);
+    // bottom
+    addQuad([w0,yKL,z0],[w1,yKL,z1],[-w1,yKL,z1],[-w0,yKL,z0]);
+    // top deck
+    addQuad([-w0,yWL,z0],[-w1,yWL,z1],[w1,yWL,z1],[w0,yWL,z0]);
+  }
+
+  // Superstructure
+  const decks=[
+    {y0:yWL, y1:yWL+0.30, w:0.30, z0:-1.8, z1:2.0},
+    {y0:yWL+0.30, y1:yWL+0.55, w:0.25, z0:-1.5, z1:1.7},
+    {y0:yWL+0.55, y1:yWL+0.75, w:0.20, z0:-1.2, z1:1.4},
+  ];
+  for(const d of decks){
+    const {y0,y1,w,z0,z1}=d;
+    // front
+    addQuad([-w,y0,z0],[w,y0,z0],[w,y1,z0],[-w,y1,z0]);
+    // back
+    addQuad([w,y0,z1],[-w,y0,z1],[-w,y1,z1],[w,y1,z1]);
+    // port
+    addQuad([w,y0,z0],[w,y0,z1],[w,y1,z1],[w,y1,z0]);
+    // starboard
+    addQuad([-w,y0,z1],[-w,y0,z0],[-w,y1,z0],[-w,y1,z1]);
+    // top
+    addQuad([-w,y1,z0],[w,y1,z0],[w,y1,z1],[-w,y1,z1]);
+  }
+
+  // Funnels (4)
+  const funnelX = [0];
+  const funnelPositions=[{z:-0.3,h:0.55},{z:0.2,h:0.55},{z:0.7,h:0.50},{z:1.2,h:0.42}];
+  for(const fp of funnelPositions){
+    const fw=0.09, y0=yWL+0.75, y1=y0+fp.h, z=fp.z;
+    addQuad([-fw,y0,z-fw],[fw,y0,z-fw],[fw,y1,z-fw],[-fw,y1,z-fw]);
+    addQuad([fw,y0,z+fw],[-fw,y0,z+fw],[-fw,y1,z+fw],[fw,y1,z+fw]);
+    addQuad([fw,y0,z-fw],[fw,y0,z+fw],[fw,y1,z+fw],[fw,y1,z-fw]);
+    addQuad([-fw,y0,z+fw],[-fw,y0,z-fw],[-fw,y1,z-fw],[-fw,y1,z+fw]);
+  }
+
+  // interleave
+  const data=[];
+  for(let i=0;i<verts.length/3;i++){
+    data.push(verts[i*3],verts[i*3+1],verts[i*3+2],
+              norms[i*3],norms[i*3+1],norms[i*3+2]);
+  }
+  return { vertices:data, indices:inds, stride:6,
+           attribs:[['aPos',3,0],['aNormal',3,3]] };
+}
+
+// ------ Iceberg ------
+function buildIceberg(seed, scale) {
+  const verts=[], norms=[], inds=[];
+  // Procedural jagged iceberg using random displaced cone
+  const slices=16, rings=8;
+  const rng=(s)=>{ let x=Math.sin(s)*43758.5453; return x-Math.floor(x); };
+
+  const profile=[];
+  for(let r=0;r<=rings;r++){
+    const t=r/rings;
+    // base radius tapers, then bulges, then sharp peak
+    const baseR = (1.0-t*t) * 0.9 + 0.05;
+    const y = t * 1.5 * scale;
+    profile.push({y, r:baseR*scale});
+  }
+
+  const pts=[];
+  for(let r=0;r<=rings;r++){
+    for(let s=0;s<=slices;s++){
+      const a = s/slices*Math.PI*2;
+      const bumpR = 1.0 + (rng(seed+r*37+s)*2-1)*0.35;
+      const bumpY = (rng(seed+r*13+s*7)*2-1)*0.12*scale;
+      const rad = profile[r].r * bumpR;
+      pts.push([
+        Math.cos(a)*rad,
+        profile[r].y + bumpY,
+        Math.sin(a)*rad
+      ]);
+    }
+  }
+
+  function addTri(p0,p1,p2){
+    const i=verts.length/3;
+    const e1=[p1[0]-p0[0],p1[1]-p0[1],p1[2]-p0[2]];
+    const e2=[p2[0]-p0[0],p2[1]-p0[1],p2[2]-p0[2]];
+    const n=[e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
+    const l=Math.hypot(...n)||1;
+    for(const p of [p0,p1,p2]){ verts.push(...p); norms.push(n[0]/l,n[1]/l,n[2]/l); }
+    inds.push(i,i+1,i+2);
+  }
+
+  for(let r=0;r<rings;r++){
+    for(let s=0;s<slices;s++){
+      const a=pts[r*(slices+1)+s],   b=pts[r*(slices+1)+s+1],
+            c=pts[(r+1)*(slices+1)+s], d=pts[(r+1)*(slices+1)+s+1];
+      addTri(a,c,b); addTri(b,c,d);
+    }
+  }
+
+  const data=[];
+  for(let i=0;i<verts.length/3;i++){
+    data.push(verts[i*3],verts[i*3+1],verts[i*3+2],
+              norms[i*3],norms[i*3+1],norms[i*3+2]);
+  }
+  return { vertices:data, indices:inds, stride:6,
+           attribs:[['aPos',3,0],['aNormal',3,3]] };
+}
+
+// =====================================================
+//  BUILD & CACHE VAOs
+// =====================================================
+const shipGeo  = buildShip();
+let   iceGeo   = buildIceberg(42, 1.0);
+
+let shipVAO = createVAO(progObj, shipGeo);
+let iceVAO  = createVAO(progObj, iceGeo);
+
+// =====================================================
+//  MATH
+// =====================================================
+function mat4() { return new Float32Array(16); }
+function identity(m) {
+  m.fill(0);
+  m[0]=m[5]=m[10]=m[15]=1;
+  return m;
+}
+function perspective(m, fov, aspect, near, far) {
+  const f=1/Math.tan(fov/2), d=far-near;
+  m.fill(0);
+  m[0]=f/aspect; m[5]=f;
+  m[10]=-(far+near)/d; m[11]=-1;
+  m[14]=-2*far*near/d;
+  return m;
+}
+function lookAt(m, eye, center, up) {
+  let fx=center[0]-eye[0], fy=center[1]-eye[1], fz=center[2]-eye[2];
+  let l=Math.hypot(fx,fy,fz);
+  fx/=l; fy/=l; fz/=l;
+  let rx=fy*up[2]-fz*up[1], ry=fz*up[0]-fx*up[2], rz=fx*up[1]-fy*up[0];
+  l=Math.hypot(rx,ry,rz);
+  rx/=l; ry/=l; rz/=l;
+  let ux=ry*fz-rz*fy, uy=rz*fx-rx*fz, uz=rx*fy-ry*fx;
+  m[0]=rx; m[1]=ux; m[2]=-fx; m[3]=0;
+  m[4]=ry; m[5]=uy; m[6]=-fy; m[7]=0;
+  m[8]=rz; m[9]=uz; m[10]=-fz; m[11]=0;
+  m[12]=-(rx*eye[0]+ry*eye[1]+rz*eye[2]);
+  m[13]=-(ux*eye[0]+uy*eye[1]+uz*eye[2]);
+  m[14]= (fx*eye[0]+fy*eye[1]+fz*eye[2]);
+  m[15]=1;
+  return m;
+}
+function mulMat4(out, a, b) {
+  for(let i=0;i<4;i++) for(let j=0;j<4;j++){
+    out[i*4+j]=0;
+    for(let k=0;k<4;k++) out[i*4+j]+=a[i*4+k]*b[k*4+j];
+  }
+  return out;
+}
+function translate(m, tx, ty, tz) {
+  identity(m);
+  m[12]=tx; m[13]=ty; m[14]=tz;
+  return m;
+}
+function scale(m, sx, sy, sz) {
+  identity(m);
+  m[0]=sx; m[5]=sy; m[10]=sz;
+  return m;
+}
+function rotY(m, a) {
+  identity(m);
+  m[0]=Math.cos(a); m[2]=Math.sin(a);
+  m[8]=-Math.sin(a); m[10]=Math.cos(a);
+  return m;
+}
+function rotZ(m, a) {
+  identity(m);
+  m[0]=Math.cos(a); m[1]=-Math.sin(a);
+  m[4]=Math.sin(a); m[5]=Math.cos(a);
+  return m;
+}
+
+// =====================================================
+//  CAMERA
+// =====================================================
+let camAngleH = 0.4, camAngleV = 0.25, camDist = 18;
+let drag = false, lastMX = 0, lastMY = 0;
+canvas.addEventListener('mousedown', e=>{drag=true; lastMX=e.clientX; lastMY=e.clientY;});
+canvas.addEventListener('mouseup',   ()=>drag=false);
+canvas.addEventListener('mousemove', e=>{
+  if(!drag) return;
+  camAngleH += (e.clientX-lastMX)*0.005;
+  camAngleV  = Math.min(1.2, Math.max(0.05, camAngleV+(e.clientY-lastMY)*0.004));
+  lastMX=e.clientX; lastMY=e.clientY;
+});
+canvas.addEventListener('wheel', e=>{ camDist=Math.min(50,Math.max(4,camDist+e.deltaY*0.015)); });
+
+// Touch
+let t0=null;
+canvas.addEventListener('touchstart', e=>{ t0={x:e.touches[0].clientX,y:e.touches[0].clientY}; });
+canvas.addEventListener('touchmove',  e=>{
+  const t=e.touches[0];
+  camAngleH+=(t.clientX-t0.x)*0.006;
+  camAngleV=Math.min(1.2,Math.max(0.05,camAngleV+(t.clientY-t0.y)*0.005));
+  t0={x:t.clientX,y:t.clientY};
+});
+
+// =====================================================
+//  UI PARAMS
+// =====================================================
+let params = { waveH:1.2, waveS:1.0, windD:0.4, chop:1.2, fogD:0.18, iceS:1.0 };
+document.getElementById('waveH').oninput = e=> params.waveH = +e.target.value;
+document.getElementById('waveS').oninput = e=> params.waveS = +e.target.value;
+document.getElementById('windD').oninput = e=> params.windD = +e.target.value;
+document.getElementById('chop' ).oninput = e=> params.chop  = +e.target.value;
+document.getElementById('fogD' ).oninput = e=> params.fogD  = +e.target.value;
+document.getElementById('iceS' ).oninput = e=>{
+  params.iceS = +e.target.value;
+  iceGeo = buildIceberg(42, params.iceS);
+  iceVAO = createVAO(progObj, iceGeo);
+};
+
+// =====================================================
+//  RENDER LOOP
+// =====================================================
+const proj  = mat4(), view  = mat4(), mvp  = mat4();
+const model = mat4(), mvp2  = mat4(), tmp  = mat4();
+
+function render(ts) {
+  const t = ts * 0.001;
+
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0.04, 0.08, 0.15, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  // Camera
+  const cx = Math.sin(camAngleH) * Math.cos(camAngleV) * camDist;
+  const cy = Math.sin(camAngleV) * camDist + 1.5;
+  const cz = Math.cos(camAngleH) * Math.cos(camAngleV) * camDist;
+  const eye = [cx, cy, cz];
+
+  perspective(proj, 0.75, W/H, 0.1, 300);
+  lookAt(view, eye, [0, 0.5, 0], [0,1,0]);
+  mulMat4(mvp, proj, view);
+
+  // ---- SKYBOX ----
+  gl.depthMask(false);
+  gl.disable(gl.DEPTH_TEST);
+  gl.useProgram(progSky);
+  gl.uniformMatrix4fv(gl.getUniformLocation(progSky,'uView'), false, view);
+  gl.uniformMatrix4fv(gl.getUniformLocation(progSky,'uProj'), false, proj);
+  gl.uniform1f(gl.getUniformLocation(progSky,'uTime'), t);
+  gl.bindVertexArray(skyVAO.vao);
+  gl.drawElements(gl.TRIANGLES, skyVAO.count, gl.UNSIGNED_INT, 0);
+  gl.depthMask(true);
+  gl.enable(gl.DEPTH_TEST);
+
+  // ---- OBJECTS ----
+  gl.useProgram(progObj);
+  const uObjLocs = {
+    uMVP: gl.getUniformLocation(progObj,'uMVP'),
+    uModel: gl.getUniformLocation(progObj,'uModel'),
+    uColor: gl.getUniformLocation(progObj,'uColor'),
+    uCamPos: gl.getUniformLocation(progObj,'uCamPos'),
+    uMetallic: gl.getUniformLocation(progObj,'uMetallic'),
+    uRoughness: gl.getUniformLocation(progObj,'uRoughness'),
+    uFogDensity: gl.getUniformLocation(progObj,'uFogDensity'),
+  };
+  gl.uniform3fv(uObjLocs.uCamPos,    eye);
+  gl.uniform1f (uObjLocs.uFogDensity, params.fogD);
+
+  // Ship (bob on waves)
+  const shipBobY = Math.sin(t*0.9) * 0.10 * params.waveH;
+  const shipTiltZ = Math.sin(t*1.1) * 0.03 * params.waveH;
+  const shipTiltX = Math.sin(t*0.7) * 0.02 * params.waveH;
+  translate(tmp, 1.5, shipBobY, -1.0);
+  rotY(model, -0.3);
+  rotZ(tmp, shipTiltZ);
+  mulMat4(model, tmp, model);
+  mulMat4(mvp2, mvp, model);
+  gl.uniformMatrix4fv(uObjLocs.uMVP,   false, mvp2);
+  gl.uniformMatrix4fv(uObjLocs.uModel, false, model);
+  gl.uniform3fv(uObjLocs.uColor,    [0.22, 0.22, 0.24]);
+  gl.uniform1f (uObjLocs.uMetallic,  0.4);
+  gl.uniform1f (uObjLocs.uRoughness, 0.6);
+  gl.bindVertexArray(shipVAO.vao);
+  gl.drawElements(gl.TRIANGLES, shipGeo.indices.length, gl.UNSIGNED_INT, 0);
+
+  // Iceberg
+  const iceBobY = Math.sin(t*0.5+1.2)*0.05*params.waveH;
+  translate(model, -2.0, -0.30+iceBobY, 0.5);
+  mulMat4(mvp2, mvp, model);
+  gl.uniformMatrix4fv(uObjLocs.uMVP,   false, mvp2);
+  gl.uniformMatrix4fv(uObjLocs.uModel, false, model);
+  gl.uniform3fv(uObjLocs.uColor,    [0.82, 0.90, 0.96]);
+  gl.uniform1f (uObjLocs.uMetallic,  0.05);
+  gl.uniform1f (uObjLocs.uRoughness, 0.3);
+  gl.bindVertexArray(iceVAO.vao);
+  gl.drawElements(gl.TRIANGLES, iceGeo.indices.length, gl.UNSIGNED_INT, 0);
+
+  // ---- OCEAN ----
+  gl.useProgram(progOcean);
+  const uOcLocs = {
+    uMVP: gl.getUniformLocation(progOcean,'uMVP'),
+    uModel: gl.getUniformLocation(progOcean,'uModel'),
+    uTime: gl.getUniformLocation(progOcean,'uTime'),
+    uWaveH: gl.getUniformLocation(progOcean,'uWaveH'),
+    uWaveS: gl.getUniformLocation(progOcean,'uWaveS'),
+    uWindDir: gl.getUniformLocation(progOcean,'uWindDir'),
+    uChop: gl.getUniformLocation(progOcean,'uChop'),
+    uCamPos: gl.getUniformLocation(progOcean,'uCamPos'),
+    uFogDensity: gl.getUniformLocation(progOcean,'uFogDensity'),
+  };
+  identity(model);
+  mulMat4(mvp2, mvp, model);
+  gl.uniformMatrix4fv(uOcLocs.uMVP,   false, mvp2);
+  gl.uniformMatrix4fv(uOcLocs.uModel, false, model);
+  gl.uniform1f(uOcLocs.uTime,    t);
+  gl.uniform1f(uOcLocs.uWaveH,   params.waveH);
+  gl.uniform1f(uOcLocs.uWaveS,   params.waveS);
+  gl.uniform1f(uOcLocs.uWindDir, params.windDir||params.windD);
+  gl.uniform1f(uOcLocs.uChop,    params.chop);
+  gl.uniform3fv(uOcLocs.uCamPos, eye);
+  gl.uniform1f(uOcLocs.uFogDensity, params.fogD);
+  gl.bindVertexArray(oceanVAO.vao);
+  gl.drawElements(gl.TRIANGLES, oceanGeo.indices.length, gl.UNSIGNED_INT, 0);
+
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
