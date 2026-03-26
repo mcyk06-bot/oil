@@ -2,727 +2,567 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>Ocean Simulator</title>
+<title>流体オブジェ シミュレーター</title>
 <style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:#001020; overflow:hidden; }
-canvas { display:block; }
-#ui {
-  position:fixed; top:12px; left:12px;
-  background:rgba(0,10,30,0.85);
-  border:1px solid #1a5a8b;
-  border-radius:10px;
-  padding:12px 16px;
-  color:#adf;
-  font:13px/2.0 Arial,sans-serif;
-  z-index:10; min-width:210px;
-}
-#ui b { font-size:14px; color:#7ef; }
-#ui label { display:flex; justify-content:space-between; align-items:center; gap:8px; }
-#ui input[type=range] { width:110px; cursor:pointer; }
-#info { position:fixed; bottom:10px; left:50%; transform:translateX(-50%);
-  color:#adf; font:12px Arial; opacity:0.6; pointer-events:none; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Arial', sans-serif;
+  }
+  h1 {
+    color: #88ccff;
+    margin-bottom: 20px;
+    font-size: 1.2em;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  .container {
+    position: relative;
+    width: 800px;
+    height: 300px;
+  }
+  canvas {
+    border-radius: 12px;
+    box-shadow:
+      0 0 40px rgba(0,120,255,0.4),
+      0 0 80px rgba(0,80,200,0.2),
+      inset 0 0 30px rgba(0,0,0,0.5);
+  }
+  .controls {
+    margin-top: 20px;
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .ctrl {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    color: #88ccff;
+    font-size: 0.75em;
+  }
+  input[type=range] {
+    width: 120px;
+    accent-color: #4499ff;
+  }
+  .btn {
+    background: rgba(0,100,255,0.2);
+    color: #88ccff;
+    border: 1px solid #4499ff;
+    padding: 8px 18px;
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 0.8em;
+    transition: all 0.2s;
+  }
+  .btn:hover { background: rgba(0,100,255,0.5); }
 </style>
 </head>
 <body>
-<canvas id="c"></canvas>
-<div id="ui">
-  <b>🌊 Ocean Simulator</b><br>
-  <label>Wave Height <input type="range" id="wH" min="0.1" max="3"   step="0.05" value="1.2"></label>
-  <label>Wave Speed  <input type="range" id="wS" min="0.1" max="3"   step="0.05" value="1.0"></label>
-  <label>Choppiness  <input type="range" id="ch" min="0"   max="2"   step="0.05" value="1.0"></label>
-  <label>Fog Density <input type="range" id="fg" min="0"   max="1"   step="0.02" value="0.15"></label>
-  <label>Ice Size    <input type="range" id="is" min="0.3" max="3"   step="0.1"  value="1.0"></label>
+<h1>🌊 Fluid Object Simulator</h1>
+<div class="container">
+  <canvas id="c" width="800" height="300"></canvas>
 </div>
-<div id="info">ドラッグ：回転　ホイール：ズーム</div>
+
+<div class="controls">
+  <div class="ctrl">
+    <span>傾き速度</span>
+    <input type="range" id="tiltSpeed" min="0.1" max="3" step="0.1" value="0.6">
+  </div>
+  <div class="ctrl">
+    <span>傾き角度</span>
+    <input type="range" id="tiltAngle" min="5" max="40" step="1" value="18">
+  </div>
+  <div class="ctrl">
+    <span>波の激しさ</span>
+    <input type="range" id="waveIntensity" min="0.1" max="3" step="0.1" value="1.0">
+  </div>
+  <div class="ctrl">
+    <span>粘度</span>
+    <input type="range" id="viscosity" min="0.1" max="1.0" step="0.05" value="0.55">
+  </div>
+  <div class="ctrl">
+    <span>渦の強さ</span>
+    <input type="range" id="vortexStr" min="0" max="3" step="0.1" value="1.2">
+  </div>
+  <button class="btn" onclick="addShake()">💥 シェイク！</button>
+  <button class="btn" onclick="toggleObjects()">🚢 オブジェ表示</button>
+</div>
 
 <script>
-// ============================================================
-// WebGL2 セットアップ
-// ============================================================
 const canvas = document.getElementById('c');
-canvas.width  = window.innerWidth;
-canvas.height = window.innerHeight;
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
 
-const gl = canvas.getContext('webgl2', { antialias: true, depth: true });
-if (!gl) {
-  document.body.innerHTML = '<p style="color:red;font-size:24px;padding:40px">WebGL2 非対応ブラウザです</p>';
-  throw new Error('no webgl2');
-}
-gl.enable(gl.DEPTH_TEST);
-gl.depthFunc(gl.LEQUAL);
-gl.enable(gl.BLEND);
-gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-gl.clearColor(0.03, 0.07, 0.15, 1.0);
+// ── パラメータ ──────────────────────────
+let TILT_SPEED    = 0.6;
+let TILT_ANGLE    = 18;
+let WAVE_INTENSITY= 1.0;
+let VISCOSITY     = 0.55;
+let VORTEX_STR    = 1.2;
+let showObjects   = true;
+let shakeEnergy   = 0;
 
-// ============================================================
-// シェーダーコンパイル
-// ============================================================
-function compileShader(type, src) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, '#version 300 es\n' + src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    const err = gl.getShaderInfoLog(s);
-    console.error('Shader compile error:\n', err);
-    console.error('Source:\n', src);
-    throw new Error(err);
+document.getElementById('tiltSpeed').oninput    = e => TILT_SPEED     = +e.target.value;
+document.getElementById('tiltAngle').oninput    = e => TILT_ANGLE      = +e.target.value;
+document.getElementById('waveIntensity').oninput= e => WAVE_INTENSITY  = +e.target.value;
+document.getElementById('viscosity').oninput    = e => VISCOSITY       = +e.target.value;
+document.getElementById('vortexStr').oninput    = e => VORTEX_STR      = +e.target.value;
+
+function addShake(){ shakeEnergy = 8; }
+function toggleObjects(){ showObjects = !showObjects; }
+
+// ── 流体シミュレーション（1D Wave + SPH風粒子） ──
+const N = 120; // 水面分割数
+const waterSurface = new Float32Array(N); // 高さ
+const waterVel     = new Float32Array(N); // 速度
+const oilSurface   = new Float32Array(N); // オイル層の高さ
+const oilVel       = new Float32Array(N);
+
+// 渦パーティクル
+const VORTICES = 6;
+const vortex = Array.from({length: VORTICES}, (_, i) => ({
+  x: Math.random() * W,
+  y: H * 0.5 + (Math.random()-0.5)*60,
+  vx: (Math.random()-0.5)*0.8,
+  vy: (Math.random()-0.5)*0.4,
+  r: 20 + Math.random()*40,
+  strength: (Math.random()*2-1) * 0.5,
+  life: Math.random()*200
+}));
+
+// ── 状態変数 ──
+let tiltPhase = 0;
+let time = 0;
+
+// ── 波の更新 ──
+function updateWave(surf, vel, dt, damping, speed) {
+  const c2 = speed * speed;
+  for (let i = 1; i < N-1; i++) {
+    const accel = c2 * (surf[i-1] + surf[i+1] - 2*surf[i]);
+    vel[i] += accel * dt;
+    vel[i] *= damping;
   }
-  return s;
+  for (let i = 1; i < N-1; i++) surf[i] += vel[i] * dt;
+  // 境界
+  surf[0] = surf[1]; surf[N-1] = surf[N-2];
+  vel[0]  = vel[1];  vel[N-1]  = vel[N-2];
 }
-function createProgram(vsSrc, fsSrc) {
-  const prog = gl.createProgram();
-  gl.attachShader(prog, compileShader(gl.VERTEX_SHADER,   vsSrc));
-  gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, fsSrc));
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    const err = gl.getProgramInfoLog(prog);
-    console.error('Program link error:\n', err);
-    throw new Error(err);
+
+// ── 外力（傾き） ──
+function applyTilt(surf, vel, tiltAngle) {
+  // 傾きによって左右に液体が流れる
+  const slope = Math.sin(tiltAngle * Math.PI/180);
+  for (let i = 0; i < N; i++) {
+    const force = slope * (i/N - 0.5) * 0.8 * WAVE_INTENSITY;
+    vel[i] += force;
   }
-  return prog;
 }
 
-// ============================================================
-// GLSL ソース (#version は compileShader で付加)
-// ============================================================
-
-/* ---------- SKY ---------- */
-const SKY_VS = `
-precision highp float;
-in vec3 aPos;
-out vec3 vDir;
-uniform mat4 uVP;
-void main() {
-  vDir = aPos;
-  // カメラ位置無視、常に遠くに描画
-  mat4 v = uVP;
-  v[3][0] = 0.0; v[3][1] = 0.0; v[3][2] = 0.0;
-  vec4 pos = v * vec4(aPos * 100.0, 1.0);
-  gl_Position = pos.xyww;
-}`;
-
-const SKY_FS = `
-precision highp float;
-in vec3 vDir;
-out vec4 fragColor;
-uniform float uTime;
-
-float hash(float n) { return fract(sin(n) * 43758.5453); }
-float vnoise(vec3 p) {
-  vec3 i = floor(p), f = fract(p);
-  vec3 u = f * f * (3.0 - 2.0 * f);
-  float n000 = hash(dot(i,             vec3(1.0,57.0,113.0)));
-  float n100 = hash(dot(i+vec3(1,0,0), vec3(1.0,57.0,113.0)));
-  float n010 = hash(dot(i+vec3(0,1,0), vec3(1.0,57.0,113.0)));
-  float n110 = hash(dot(i+vec3(1,1,0), vec3(1.0,57.0,113.0)));
-  float n001 = hash(dot(i+vec3(0,0,1), vec3(1.0,57.0,113.0)));
-  float n101 = hash(dot(i+vec3(1,0,1), vec3(1.0,57.0,113.0)));
-  float n011 = hash(dot(i+vec3(0,1,1), vec3(1.0,57.0,113.0)));
-  float n111 = hash(dot(i+vec3(1,1,1), vec3(1.0,57.0,113.0)));
-  return mix(
-    mix(mix(n000,n100,u.x), mix(n010,n110,u.x), u.y),
-    mix(mix(n001,n101,u.x), mix(n011,n111,u.x), u.y), u.z);
-}
-void main() {
-  vec3 d = normalize(vDir);
-  // 空グラデーション
-  vec3 col = mix(vec3(0.55,0.72,0.92), vec3(0.02,0.08,0.28), clamp(d.y*1.5,0.0,1.0));
-  if (d.y < 0.0) col = mix(vec3(0.55,0.72,0.92), vec3(0.38,0.28,0.18), clamp(-d.y*3.0,0.0,1.0));
-  // 太陽
-  vec3 sunDir = normalize(vec3(0.5, 0.85, 0.3));
-  float sv = max(dot(d, sunDir), 0.0);
-  col += vec3(1.0,0.95,0.80) * pow(sv, 256.0) * 6.0;
-  col += vec3(1.0,0.80,0.45) * pow(sv, 5.0) * 0.22;
-  // 雲
-  if (d.y > 0.03) {
-    vec3 cp = d / (d.y + 0.001) * 3.5;
-    cp.xz += vec2(uTime * 0.007, 0.0);
-    float cl = vnoise(cp*0.5)*0.5 + vnoise(cp*1.1)*0.3 + vnoise(cp*2.2)*0.2;
-    cl = smoothstep(0.46, 0.70, cl) * smoothstep(0.03, 0.18, d.y);
-    col = mix(col, vec3(0.92,0.95,0.98), cl);
-  }
-  fragColor = vec4(col, 1.0);
-}`;
-
-/* ---------- OCEAN ---------- */
-const OCEAN_VS = `
-precision highp float;
-in vec3 aPos;
-in vec2 aUV;
-out vec3 vWorld;
-out vec3 vNorm;
-out vec2 vUV;
-out float vFoam;
-uniform mat4 uVP;
-uniform float uTime;
-uniform float uWH;
-uniform float uWS;
-uniform float uChop;
-
-// Gerstner wave: 変位を返す
-vec3 gWave(vec3 p, vec2 dir, float amp, float wlen, float spd, float steep, float t) {
-  float k   = 6.28318 / wlen;
-  float c   = sqrt(9.8 / k) * spd;
-  float f   = k * (dot(dir, p.xz) - c * t);
-  float sa  = steep / k;
-  return vec3(dir.x * sa * cos(f), amp * sin(f), dir.y * sa * cos(f));
-}
-// 法線寄与（∂pos/∂x, ∂pos/∂z の近似）
-vec3 gNorm(vec3 p, vec2 dir, float amp, float wlen, float spd, float t) {
-  float k = 6.28318 / wlen;
-  float c = sqrt(9.8 / k) * spd;
-  float f = k * (dot(dir, p.xz) - c * t);
-  return vec3(-dir.x * k * amp * cos(f),
-               0.0,
-              -dir.y * k * amp * cos(f));
-}
-
-void main() {
-  float t  = uTime * uWS;
-  vec2 d0  = normalize(vec2( 0.80,  0.60));
-  vec2 d1  = normalize(vec2(-0.50,  0.88));
-  vec2 d2  = normalize(vec2( 0.30, -0.72));
-  vec2 d3  = normalize(vec2(-0.88, -0.40));
-  vec2 d4  = normalize(vec2( 0.60,  0.22));
-
-  vec3 pos = aPos;
-  float ch = uChop;
-  pos += gWave(pos, d0, 0.28*uWH, 6.0, 1.00, ch*0.55, t);
-  pos += gWave(pos, d1, 0.18*uWH, 3.5, 1.30, ch*0.45, t);
-  pos += gWave(pos, d2, 0.11*uWH, 2.2, 1.70, ch*0.35, t);
-  pos += gWave(pos, d3, 0.07*uWH, 1.3, 2.20, ch*0.25, t);
-  pos += gWave(pos, d4, 0.04*uWH, 0.7, 2.80, ch*0.15, t);
-
-  vFoam = smoothstep(0.15, 0.65, pos.y / max(uWH, 0.01));
-
-  vec3 n = vec3(0.0, 1.0, 0.0);
-  n += gNorm(aPos, d0, 0.28*uWH, 6.0, 1.00, t);
-  n += gNorm(aPos, d1, 0.18*uWH, 3.5, 1.30, t);
-  n += gNorm(aPos, d2, 0.11*uWH, 2.2, 1.70, t);
-  vNorm  = normalize(n);
-  vWorld = pos;
-  vUV    = aUV;
-  gl_Position = uVP * vec4(pos, 1.0);
-}`;
-
-const OCEAN_FS = `
-precision highp float;
-in vec3 vWorld;
-in vec3 vNorm;
-in vec2 vUV;
-in float vFoam;
-out vec4 fragColor;
-uniform vec3 uCam;
-uniform float uTime;
-uniform float uFog;
-
-float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float noise2(vec2 p) {
-  vec2 i = floor(p), f = fract(p), u = f*f*(3.0-2.0*f);
-  return mix(mix(hash2(i), hash2(i+vec2(1,0)), u.x),
-             mix(hash2(i+vec2(0,1)), hash2(i+vec2(1,1)), u.x), u.y);
-}
-
-void main() {
-  vec3 N = normalize(vNorm);
-  vec3 V = normalize(uCam - vWorld);
-  vec3 L = normalize(vec3(0.5, 1.0, 0.3));
-
-  // マイクロ波紋
-  float nb1 = noise2(vUV * 22.0 + uTime * 0.12);
-  float nb2 = noise2(vUV * 44.0 - uTime * 0.09);
-  N = normalize(N + vec3((nb1-0.5)*0.05, 0.0, (nb2-0.5)*0.05));
-
-  // Fresnel
-  float fr = pow(1.0 - max(dot(N, V), 0.0), 4.5);
-  fr = mix(0.03, 1.0, fr);
-
-  // 反射色（空グラデ近似）
-  vec3 R       = reflect(-V, N);
-  vec3 skyTop  = vec3(0.02,0.08,0.28);
-  vec3 skyHor  = vec3(0.50,0.68,0.90);
-  float skyT   = clamp(R.y * 2.0 + 0.25, 0.0, 1.0);
-  vec3 reflCol = mix(skyHor, skyTop, skyT);
-  // 太陽グリント
-  vec3 sunDir  = normalize(vec3(0.5, 0.85, 0.3));
-  reflCol += vec3(1.0,0.95,0.80) * pow(max(dot(R, sunDir),0.0), 300.0) * 10.0;
-
-  // 水の色
-  float dep    = clamp(1.0 - pos_y_approx(vWorld.y) * 0.5, 0.0, 1.0);
-  vec3 shallow = vec3(0.04, 0.30, 0.50);
-  vec3 deep    = vec3(0.01, 0.05, 0.18);
-  vec3 wCol    = mix(shallow, deep, clamp(1.0-vWorld.y*0.5, 0.0, 1.0));
-  // SSS
-  wCol += vec3(0.0, 0.32, 0.22) * pow(max(dot(L, -V), 0.0), 4.0) * 0.4;
-
-  // スペキュラ
-  vec3 H   = normalize(L + V);
-  vec3 sp  = vec3(1.0,0.97,0.92) * pow(max(dot(N,H),0.0), 220.0) * 2.8;
-
-  vec3 col = mix(wCol, reflCol, fr) + sp;
-
-  // 泡
-  float fn = noise2(vUV * 28.0 + uTime * 0.38);
-  col = mix(col, vec3(0.88, 0.93, 1.0), vFoam * fn * 0.75);
-
-  // フォグ
-  float dist = length(uCam - vWorld);
-  col = mix(col, vec3(0.52,0.63,0.80), 1.0-exp(-uFog*dist*0.06));
-
-  fragColor = vec4(col, 0.88 + fr * 0.12);
-}`;
-
-/* ---------- SOLID OBJECT ---------- */
-const OBJ_VS = `
-precision highp float;
-in vec3 aPos;
-in vec3 aNorm;
-out vec3 vWorld;
-out vec3 vNorm;
-uniform mat4 uMVP;
-uniform mat4 uM;
-void main() {
-  vec4 wp  = uM * vec4(aPos, 1.0);
-  vWorld   = wp.xyz;
-  vNorm    = normalize(mat3(uM) * aNorm);
-  gl_Position = uMVP * vec4(aPos, 1.0);
-}`;
-
-const OBJ_FS = `
-precision highp float;
-in vec3 vWorld;
-in vec3 vNorm;
-out vec4 fragColor;
-uniform vec3  uColor;
-uniform vec3  uCam;
-uniform float uMetal;
-uniform float uRough;
-uniform float uFog;
-void main() {
-  vec3 N = normalize(vNorm);
-  vec3 V = normalize(uCam - vWorld);
-  vec3 L = normalize(vec3(0.5, 1.0, 0.3));
-  vec3 H = normalize(L + V);
-  float diff = max(dot(N, L), 0.0) * 0.8 + 0.20;
-  float spec = pow(max(dot(N, H), 0.0), mix(8.0, 512.0, 1.0 - uRough))
-               * mix(0.25, 2.5, uMetal);
-  vec3 amb  = uColor * (0.3 + 0.3*N.y) * vec3(0.35,0.50,0.75);
-  vec3 col  = uColor * diff + vec3(1.0) * spec + amb;
-  float fogF = 1.0 - exp(-uFog * length(uCam - vWorld) * 0.06);
-  col = mix(col, vec3(0.52,0.63,0.80), fogF);
-  fragColor = vec4(col, 1.0);
-}`;
-
-// ============================================================
-// OCEAN_FSのpos_y_approxを修正してから再定義
-// ============================================================
-const OCEAN_FS_FIXED = OCEAN_FS.replace(
-  'float dep    = clamp(1.0 - pos_y_approx(vWorld.y) * 0.5, 0.0, 1.0);',
-  ''
-);
-
-// ============================================================
-// Programs（修正済みソース使用）
-// ============================================================
-let progSky, progSea, progObj;
-try {
-  progSky = createProgram(SKY_VS, SKY_FS);
-  progSea = createProgram(OCEAN_VS, OCEAN_FS.replace(
-    'float dep    = clamp(1.0 - pos_y_approx(vWorld.y) * 0.5, 0.0, 1.0);\n  vec3 wCol    = mix(shallow, deep, clamp(1.0-vWorld.y*0.5, 0.0, 1.0));',
-    'vec3 wCol    = mix(shallow, deep, clamp(1.0-vWorld.y*0.5, 0.0, 1.0));'
-  ));
-  progObj = createProgram(OBJ_VS, OBJ_FS);
-} catch(e) {
-  console.error(e);
-}
-
-// ============================================================
-// VAO ビルダー
-// ============================================================
-function buildVAO(prog, floatData, indexData, layout) {
-  // layout = [{name, size}, ...]
-  const vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-
-  const vbo = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(floatData), gl.STATIC_DRAW);
-
-  const stride = layout.reduce((s, a) => s + a.size, 0) * 4;
-  let off = 0;
-  for (const {name, size} of layout) {
-    const loc = gl.getAttribLocation(prog, name);
-    if (loc !== -1) {
-      gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride, off);
+// ── 渦の更新 ──
+function updateVortices() {
+  for (const v of vortex) {
+    v.x += v.vx;
+    v.y += v.vy * 0.3;
+    v.life++;
+    if (v.life > 300 || v.x < -50 || v.x > W+50) {
+      v.x = Math.random() * W;
+      v.y = H * 0.45 + (Math.random()-0.5)*80;
+      v.vx = (Math.random()-0.5)*0.8;
+      v.vy = (Math.random()-0.5)*0.3;
+      v.r = 20 + Math.random()*50;
+      v.strength = (Math.random()*2-1)*0.6;
+      v.life = 0;
     }
-    off += size * 4;
+    // 境界反射
+    if (v.x < 30) v.vx = Math.abs(v.vx);
+    if (v.x > W-30) v.vx = -Math.abs(v.vx);
   }
-
-  const ibo = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indexData), gl.STATIC_DRAW);
-
-  gl.bindVertexArray(null);
-  return { vao, count: indexData.length };
 }
 
-// ============================================================
-// スカイボックス
-// ============================================================
-const skyVerts = [
-  -1,-1,-1,  1,-1,-1,  1, 1,-1, -1, 1,-1,
-  -1,-1, 1, -1, 1, 1,  1, 1, 1,  1,-1, 1,
-  -1,-1,-1, -1,-1, 1, -1, 1, 1, -1, 1,-1,
-   1,-1,-1,  1, 1,-1,  1, 1, 1,  1,-1, 1,
-  -1,-1,-1,  1,-1,-1,  1,-1, 1, -1,-1, 1,
-  -1, 1,-1, -1, 1, 1,  1, 1, 1,  1, 1,-1,
-];
-const skyIdx = [];
-for (let f = 0; f < 6; f++) {
-  const b = f * 4;
-  skyIdx.push(b, b+1, b+2, b, b+2, b+3);
+// ── 描画ユーティリティ ──
+function waterColor(depth, oilAmount) {
+  // 深さとオイル量で色が変わる
+  const b = Math.floor(180 + depth * 20);
+  const g = Math.floor(100 + depth * 30 - oilAmount*50);
+  const r = Math.floor(20 + oilAmount*80);
+  return `rgb(${r},${g},${b})`;
 }
-const skyVAO = buildVAO(progSky, skyVerts, skyIdx, [{name:'aPos', size:3}]);
 
-// ============================================================
-// 海面グリッド（150×150）
-// ============================================================
-function createOceanGrid(N, size) {
-  const verts = [];
-  const idx   = [];
-  for (let j = 0; j <= N; j++) {
-    for (let i = 0; i <= N; i++) {
-      verts.push(
-        (i/N - 0.5) * size, 0.0, (j/N - 0.5) * size,  // pos
-        i/N, j/N                                         // uv
-      );
+// ── 水面パスを構築 ──
+function buildSurfacePath(surf, baseY, amp) {
+  const path = new Path2D();
+  path.moveTo(0, H);
+  for (let i = 0; i < N; i++) {
+    const x = (i/(N-1)) * W;
+    const y = baseY + surf[i] * amp;
+    if (i === 0) path.lineTo(x, y);
+    else {
+      const px = ((i-1)/(N-1))*W;
+      const py = baseY + surf[i-1]*amp;
+      const cpx = (px+x)/2;
+      path.quadraticCurveTo(px+(cpx-px)*0.5, py, cpx, (py+y)/2);
     }
   }
-  for (let j = 0; j < N; j++) {
-    for (let i = 0; i < N; i++) {
-      const a = j*(N+1)+i,  b = a+1,
-            c = a+(N+1),    d = c+1;
-      idx.push(a, c, b,   b, c, d);
+  path.lineTo(W, baseY + surf[N-1]*amp);
+  path.lineTo(W, H);
+  path.lineTo(0, H);
+  path.closePath();
+  return path;
+}
+
+// ── オブジェ（船・氷山）描画 ──
+function drawObjects(waterY, oilY) {
+  if (!showObjects) return;
+
+  // 傾き計算
+  const tilt = Math.sin(tiltPhase) * TILT_ANGLE;
+  const shake = shakeEnergy * (Math.random()-0.5) * 2;
+
+  // ── 氷山 ──
+  ctx.save();
+  const iceX = W * 0.28 + Math.sin(time*0.3)*3 + shake*0.5;
+  const iceY = oilY - 20;
+  ctx.translate(iceX, iceY);
+  ctx.rotate((tilt * 0.3 + shake) * Math.PI/180);
+
+  // 水中部分
+  const iceGradUnder = ctx.createLinearGradient(0,0,0,60);
+  iceGradUnder.addColorStop(0,'rgba(180,230,255,0.6)');
+  iceGradUnder.addColorStop(1,'rgba(100,160,220,0.3)');
+  ctx.fillStyle = iceGradUnder;
+  ctx.beginPath();
+  ctx.moveTo(-18, 0);
+  ctx.lineTo(-28, 55);
+  ctx.lineTo(28, 55);
+  ctx.lineTo(18, 0);
+  ctx.closePath();
+  ctx.fill();
+
+  // 水上部分（氷山本体）
+  const iceGrad = ctx.createLinearGradient(-20,-60,20,0);
+  iceGrad.addColorStop(0,'#f0f8ff');
+  iceGrad.addColorStop(0.4,'#d0eaff');
+  iceGrad.addColorStop(1,'#a0cce0');
+  ctx.fillStyle = iceGrad;
+  ctx.beginPath();
+  ctx.moveTo(-18, 0);
+  ctx.lineTo(-25, -25);
+  ctx.lineTo(-10, -45);
+  ctx.lineTo(2,  -65);
+  ctx.lineTo(14, -40);
+  ctx.lineTo(22, -18);
+  ctx.lineTo(18, 0);
+  ctx.closePath();
+  ctx.fill();
+  // ハイライト
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-5,-60); ctx.lineTo(-12,-30); ctx.lineTo(-8,-10);
+  ctx.stroke();
+  ctx.restore();
+
+  // ── 船（タイタニック風） ──
+  ctx.save();
+  const shipX = W * 0.58 + Math.sin(time*0.25+1)*4 + shake*0.8;
+  const shipY = oilY + 5;
+  ctx.translate(shipX, shipY);
+  ctx.rotate((tilt * 0.6 + shake*1.2) * Math.PI/180);
+
+  // 船体
+  const hullGrad = ctx.createLinearGradient(0,-15,0,30);
+  hullGrad.addColorStop(0,'#2a3a2a');
+  hullGrad.addColorStop(0.5,'#1a2a1a');
+  hullGrad.addColorStop(1,'#0a150a');
+  ctx.fillStyle = hullGrad;
+  ctx.beginPath();
+  ctx.moveTo(-80, -10);
+  ctx.lineTo(-90, 8);
+  ctx.quadraticCurveTo(-70, 28, 0, 26);
+  ctx.quadraticCurveTo(70, 28, 88, 8);
+  ctx.lineTo(80, -10);
+  ctx.closePath();
+  ctx.fill();
+
+  // 船体ライン
+  ctx.strokeStyle = 'rgba(80,120,80,0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-80,-10); ctx.lineTo(80,-10);
+  ctx.stroke();
+
+  // 甲板
+  ctx.fillStyle = '#3a4a3a';
+  ctx.fillRect(-72, -28, 152, 18);
+
+  // 煙突 × 4
+  const stackColors = ['#1a1a1a','#1a1a1a','#1a1a1a','rgba(60,60,60,0.5)'];
+  const stackX = [-35,-12,11,34];
+  for (let i = 0; i < 4; i++) {
+    // 煙突本体
+    const sg = ctx.createLinearGradient(stackX[i]-6,0,stackX[i]+6,0);
+    sg.addColorStop(0,'#333');
+    sg.addColorStop(0.5,'#555');
+    sg.addColorStop(1,'#222');
+    ctx.fillStyle = sg;
+    ctx.fillRect(stackX[i]-6, -65, 12, 37);
+    // リング（オレンジ）
+    ctx.fillStyle = '#cc5500';
+    ctx.fillRect(stackX[i]-6, -50, 12, 5);
+    ctx.fillRect(stackX[i]-6, -42, 12, 3);
+    // 上部
+    ctx.fillStyle = '#111';
+    ctx.fillRect(stackX[i]-7, -67, 14, 5);
+    // 煙
+    if (i < 3) {
+      ctx.fillStyle = `rgba(80,80,80,${0.06 + Math.sin(time*0.5+i)*0.03})`;
+      for (let s = 0; s < 5; s++) {
+        const sy = -70 - s*12;
+        const sx = stackX[i] + Math.sin(time*0.3+s+i)*4;
+        const sr = 5 + s*2.5;
+        ctx.beginPath();
+        ctx.arc(sx, sy, sr, 0, Math.PI*2);
+        ctx.fill();
+      }
     }
   }
-  return buildVAO(progSea, verts, idx,
-    [{name:'aPos',size:3},{name:'aUV',size:2}]);
-}
-const oceanVAO = createOceanGrid(150, 80);
 
-// ============================================================
-// ソリッドジオメトリ用ヘルパー
-// ============================================================
-function pushQuad(V, I, p0, p1, p2, p3) {
-  const b   = V.length / 6;
-  const e1  = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
-  const e2  = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
-  let  nx   = e1[1]*e2[2] - e1[2]*e2[1];
-  let  ny   = e1[2]*e2[0] - e1[0]*e2[2];
-  let  nz   = e1[0]*e2[1] - e1[1]*e2[0];
-  const l   = Math.hypot(nx,ny,nz) || 1;
-  nx/=l; ny/=l; nz/=l;
-  for (const p of [p0,p1,p2,p3]) V.push(p[0],p[1],p[2], nx,ny,nz);
-  I.push(b, b+1, b+2,  b, b+2, b+3);
-}
-function pushTri(V, I, p0, p1, p2) {
-  const b  = V.length / 6;
-  const e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
-  const e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
-  let  nx  = e1[1]*e2[2] - e1[2]*e2[1];
-  let  ny  = e1[2]*e2[0] - e1[0]*e2[2];
-  let  nz  = e1[0]*e2[1] - e1[1]*e2[0];
-  const l  = Math.hypot(nx,ny,nz) || 1;
-  nx/=l; ny/=l; nz/=l;
-  for (const p of [p0,p1,p2]) V.push(p[0],p[1],p[2], nx,ny,nz);
-  I.push(b, b+1, b+2);
-}
-
-// ============================================================
-// 船ジオメトリ
-// ============================================================
-function buildShip() {
-  const V=[], I=[];
-  const WL=-0.15, KL=-0.55;
-  const hull=[
-    [-3.8,0.04],[-3.4,0.20],[-2.8,0.36],[-1.5,0.48],
-    [0.0,0.50],[1.5,0.48],[2.8,0.40],[3.5,0.18],[3.9,0.04]
-  ];
-  for (let i=0; i<hull.length-1; i++) {
-    const [z0,w0]=hull[i], [z1,w1]=hull[i+1];
-    pushQuad(V,I, [w0,WL,z0],[w1,WL,z1],[w1,KL,z1],[w0,KL,z0]);  // 右舷
-    pushQuad(V,I, [-w0,KL,z0],[-w1,KL,z1],[-w1,WL,z1],[-w0,WL,z0]); // 左舷
-    pushQuad(V,I, [w0,KL,z0],[w1,KL,z1],[-w1,KL,z1],[-w0,KL,z0]); // 船底
-    pushQuad(V,I, [-w0,WL,z0],[-w1,WL,z1],[w1,WL,z1],[w0,WL,z0]); // 甲板
-  }
   // 上部構造
-  const decks=[
-    {ya:WL,    yb:WL+0.28, w:0.28, z0:-1.8, z1:2.0},
-    {ya:WL+0.28,yb:WL+0.52,w:0.22, z0:-1.5, z1:1.7},
-    {ya:WL+0.52,yb:WL+0.70,w:0.18, z0:-1.2, z1:1.4},
-  ];
-  for (const {ya,yb,w,z0,z1} of decks) {
-    pushQuad(V,I, [-w,ya,z0],[w,ya,z0],[w,yb,z0],[-w,yb,z0]); // 前
-    pushQuad(V,I, [w,ya,z1],[-w,ya,z1],[-w,yb,z1],[w,yb,z1]); // 後
-    pushQuad(V,I, [w,ya,z0],[w,ya,z1],[w,yb,z1],[w,yb,z0]);   // 右
-    pushQuad(V,I, [-w,ya,z1],[-w,ya,z0],[-w,yb,z0],[-w,yb,z1]); // 左
-    pushQuad(V,I, [-w,yb,z0],[w,yb,z0],[w,yb,z1],[-w,yb,z1]); // 上
+  ctx.fillStyle = '#2d3d2d';
+  ctx.fillRect(-50,-38,100,10);
+  ctx.fillStyle = '#354535';
+  ctx.fillRect(-30,-46,60,8);
+
+  // 窓
+  ctx.fillStyle = 'rgba(255,240,150,0.6)';
+  for (let i = -6; i <= 6; i++) {
+    ctx.fillRect(i*11-3,-22,5,4);
+    ctx.fillRect(i*9-2,-15,4,3);
   }
-  // 煙突 ×4
-  const funnelZ=[-0.25, 0.25, 0.75, 1.25];
-  for (const fz of funnelZ) {
-    const fw=0.07, y0=WL+0.70, y1=y0+0.50;
-    pushQuad(V,I,[-fw,y0,fz-fw],[fw,y0,fz-fw],[fw,y1,fz-fw],[-fw,y1,fz-fw]);
-    pushQuad(V,I,[fw,y0,fz+fw],[-fw,y0,fz+fw],[-fw,y1,fz+fw],[fw,y1,fz+fw]);
-    pushQuad(V,I,[fw,y0,fz-fw],[fw,y0,fz+fw],[fw,y1,fz+fw],[fw,y1,fz-fw]);
-    pushQuad(V,I,[-fw,y0,fz+fw],[-fw,y0,fz-fw],[-fw,y1,fz-fw],[-fw,y1,fz+fw]);
-    pushQuad(V,I,[-fw,y1,fz-fw],[fw,y1,fz-fw],[fw,y1,fz+fw],[-fw,y1,fz+fw]);
-  }
-  return buildVAO(progObj, V, I, [{name:'aPos',size:3},{name:'aNorm',size:3}]);
+
+  // 水線（白帯）
+  ctx.fillStyle = 'rgba(200,220,200,0.4)';
+  ctx.fillRect(-80,-10,160,3);
+
+  ctx.restore();
 }
 
-// ============================================================
-// 氷山ジオメトリ
-// ============================================================
-function buildIceberg(seed, sc) {
-  const V=[], I=[];
-  const SLICES=14, RINGS=8;
-  const rng = s => { const x = Math.sin(s)*43758.5453; return x - Math.floor(x); };
+// ── 渦の可視化 ──
+function drawVortices(clipY) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, clipY, W, H - clipY);
+  ctx.clip();
 
-  // 頂点グリッド生成
-  const pts = [];
-  for (let r = 0; r <= RINGS; r++) {
-    const t  = r / RINGS;
-    const br = (1.0 - t*t) * 0.85 * sc + 0.04 * sc;
-    const y  = t * 1.4 * sc;
-    for (let s = 0; s <= SLICES; s++) {
-      const a   = s / SLICES * Math.PI * 2.0;
-      const nr  = 1.0 + (rng(seed + r*37 + s) * 2.0 - 1.0) * 0.36;
-      const ny2 = (rng(seed + r*13 + s*7) * 2.0 - 1.0) * 0.10 * sc;
-      pts.push([
-        Math.cos(a) * br * nr,
-        y + ny2,
-        Math.sin(a) * br * nr
-      ]);
+  for (const v of vortex) {
+    if (v.y < clipY) continue;
+    const alpha = Math.min(0.15, Math.abs(v.strength) * 0.2) * VORTEX_STR;
+    const grad = ctx.createRadialGradient(v.x, v.y, 0, v.x, v.y, v.r * VORTEX_STR);
+    grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
+    grad.addColorStop(0.4, `rgba(100,180,255,${alpha*0.5})`);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(v.x, v.y, v.r * VORTEX_STR * 1.5, 0, Math.PI*2);
+    ctx.fill();
+
+    // 渦巻き線
+    ctx.strokeStyle = `rgba(150,200,255,${alpha*0.8})`;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    for (let a = 0; a < Math.PI*4; a += 0.05) {
+      const spiral_r = (a/(Math.PI*4)) * v.r * VORTEX_STR * (v.strength > 0 ? 1 : -1);
+      const sx = v.x + spiral_r * Math.cos(a + time*0.02*v.strength);
+      const sy = v.y + spiral_r * Math.sin(a + time*0.02*v.strength) * 0.3;
+      a < 0.06 ? ctx.moveTo(sx,sy) : ctx.lineTo(sx,sy);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ── メインループ ──
+function draw() {
+  time++;
+  tiltPhase += TILT_SPEED * 0.018;
+
+  // 傾き角度（sin波）
+  const currentTilt = Math.sin(tiltPhase) * TILT_ANGLE;
+  const tiltRad = currentTilt * Math.PI/180;
+
+  // シェイク減衰
+  if (shakeEnergy > 0) {
+    shakeEnergy *= 0.92;
+    const shakeForce = shakeEnergy;
+    for (let i = 0; i < N; i++) {
+      waterVel[i] += (Math.random()-0.5) * shakeForce * WAVE_INTENSITY;
+      oilVel[i]   += (Math.random()-0.5) * shakeForce * WAVE_INTENSITY * 0.6;
     }
   }
-  for (let r = 0; r < RINGS; r++) {
-    for (let s = 0; s < SLICES; s++) {
-      const a = pts[r*(SLICES+1)+s],     b = pts[r*(SLICES+1)+s+1];
-      const c = pts[(r+1)*(SLICES+1)+s], d = pts[(r+1)*(SLICES+1)+s+1];
-      pushTri(V,I,a,c,b);
-      pushTri(V,I,b,c,d);
-    }
+
+  // 傾き外力
+  applyTilt(waterVel, waterVel, currentTilt);
+  applyTilt(oilVel, oilVel, currentTilt * 0.7);
+
+  // ランダム微小乱流
+  if (time % 3 === 0) {
+    const ri = Math.floor(Math.random() * (N-2)) + 1;
+    waterVel[ri] += (Math.random()-0.5) * 0.15 * WAVE_INTENSITY;
+    if (time % 7 === 0) oilVel[ri] += (Math.random()-0.5)*0.2*WAVE_INTENSITY;
   }
-  return {
-    geo: buildVAO(progObj, V, I, [{name:'aPos',size:3},{name:'aNorm',size:3}]),
-    count: I.length
-  };
-}
 
-// ============================================================
-// ジオメトリ生成
-// ============================================================
-const shipVAO = buildShip();
-let   ice     = buildIceberg(42, 1.0);
+  // 波の数値更新
+  const damp = 1 - (1-VISCOSITY)*0.03;
+  updateWave(waterSurface, waterVel, 1, damp, 0.35);
+  updateWave(oilSurface,   oilVel,   1, damp*0.95, 0.25);
 
-// ============================================================
-// 行列演算（列優先 Float32Array）
-// ============================================================
-function identity() {
-  return new Float32Array([
-    1,0,0,0,
-    0,1,0,0,
-    0,0,1,0,
-    0,0,0,1
-  ]);
-}
-function perspective(fovY, aspect, near, far) {
-  const f = 1.0 / Math.tan(fovY * 0.5);
-  const nf = 1.0 / (near - far);
-  return new Float32Array([
-    f/aspect, 0, 0,  0,
-    0,        f, 0,  0,
-    0,        0, (far+near)*nf, -1,
-    0,        0, 2*far*near*nf,  0
-  ]);
-}
-function lookAt(eye, center, up) {
-  let fx=center[0]-eye[0], fy=center[1]-eye[1], fz=center[2]-eye[2];
-  let rl=1/Math.hypot(fx,fy,fz); fx*=rl; fy*=rl; fz*=rl;
-  let rx=fy*up[2]-fz*up[1], ry=fz*up[0]-fx*up[2], rz=fx*up[1]-fy*up[0];
-  rl=1/(Math.hypot(rx,ry,rz)||1); rx*=rl; ry*=rl; rz*=rl;
-  const ux=ry*fz-rz*fy, uy=rz*fx-rx*fz, uz=rx*fy-ry*fx;
-  return new Float32Array([
-    rx, ux, -fx, 0,
-    ry, uy, -fy, 0,
-    rz, uz, -fz, 0,
-    -(rx*eye[0]+ry*eye[1]+rz*eye[2]),
-    -(ux*eye[0]+uy*eye[1]+uz*eye[2]),
-     (fx*eye[0]+fy*eye[1]+fz*eye[2]),
-    1
-  ]);
-}
-function mul4(a, b) {
-  const o = new Float32Array(16);
-  for (let col=0; col<4; col++) {
-    for (let row=0; row<4; row++) {
-      let s = 0;
-      for (let k=0; k<4; k++) s += a[row + k*4] * b[k + col*4];
-      o[row + col*4] = s;
-    }
+  // 渦更新
+  updateVortices();
+
+  // ── 描画 ──────────────────────────
+  ctx.clearRect(0,0,W,H);
+
+  // 背景（フレーム）
+  const bgGrad = ctx.createLinearGradient(0,0,0,H);
+  bgGrad.addColorStop(0,'#1a3a5c');
+  bgGrad.addColorStop(1,'#0a1a3a');
+  ctx.fillStyle = bgGrad;
+  ctx.beginPath();
+  ctx.roundRect(0,0,W,H,12);
+  ctx.fill();
+
+  // ── 水層の基準Y ──
+  const waterBaseY = H * 0.52 + Math.tan(tiltRad) * W * 0.08;
+  const oilBaseY   = H * 0.38 + Math.tan(tiltRad) * W * 0.06;
+  const waterAmp   = 22 * WAVE_INTENSITY;
+  const oilAmp     = 16 * WAVE_INTENSITY;
+
+  // ── 水層（深部） ──
+  const waterDeepGrad = ctx.createLinearGradient(0, waterBaseY, 0, H);
+  waterDeepGrad.addColorStop(0,'#0055aa');
+  waterDeepGrad.addColorStop(0.3,'#0044aa');
+  waterDeepGrad.addColorStop(1,'#001a55');
+  ctx.fillStyle = waterDeepGrad;
+  const waterPath = buildSurfacePath(waterSurface, waterBaseY, waterAmp);
+  ctx.fill(waterPath);
+
+  // ── 水中の光の屈折（コースティクス） ──
+  ctx.save();
+  ctx.clip(waterPath);
+  for (let i = 0; i < 8; i++) {
+    const lx = W * (0.1 + (i/8)*0.9) + Math.sin(time*0.02+i)*20;
+    const lg = ctx.createRadialGradient(lx, waterBaseY+20, 0, lx, waterBaseY+20, 80);
+    lg.addColorStop(0,'rgba(100,180,255,0.06)');
+    lg.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle = lg;
+    ctx.fillRect(0, waterBaseY, W, H-waterBaseY);
   }
-  return o;
-}
-function translate(x, y, z) {
-  const m = identity();
-  m[12]=x; m[13]=y; m[14]=z;
-  return m;
-}
-function rotY(a) {
-  const c=Math.cos(a), s=Math.sin(a);
-  const m=identity();
-  m[0]=c; m[2]=-s; m[8]=s; m[10]=c;
-  return m;
-}
-function rotZ(a) {
-  const c=Math.cos(a), s=Math.sin(a);
-  const m=identity();
-  m[0]=c; m[1]=s; m[4]=-s; m[5]=c;
-  return m;
-}
-// VP用：ビュー行列から平行移動を除去（スカイボックス用）
-function mat3ToMat4View(v) {
-  const m = new Float32Array(v);
-  m[12]=0; m[13]=0; m[14]=0;
-  return m;
-}
+  ctx.restore();
 
-// ============================================================
-// ユニフォームヘルパー
-// ============================================================
-const U = {
-  f1: (p,n,v)  => gl.uniform1f(gl.getUniformLocation(p,n), v),
-  v3: (p,n,v)  => gl.uniform3fv(gl.getUniformLocation(p,n), v),
-  m4: (p,n,v)  => gl.uniformMatrix4fv(gl.getUniformLocation(p,n), false, v),
-};
+  // 渦の描画（水層内）
+  drawVortices(waterBaseY);
 
-// ============================================================
-// カメラ制御
-// ============================================================
-let camH=0.45, camV=0.28, camDist=16;
-let drag=false, mx=0, my=0;
-canvas.addEventListener('mousedown', e => { drag=true; mx=e.clientX; my=e.clientY; });
-window.addEventListener('mouseup',   () => drag=false);
-window.addEventListener('mousemove', e => {
-  if (!drag) return;
-  camH += (e.clientX - mx) * 0.005;
-  camV  = Math.min(1.3, Math.max(0.04, camV + (e.clientY - my) * 0.004));
-  mx=e.clientX; my=e.clientY;
-});
-canvas.addEventListener('wheel', e => {
-  camDist = Math.min(50, Math.max(4, camDist + e.deltaY * 0.012));
-}, { passive: true });
-let touch0 = null;
-canvas.addEventListener('touchstart', e => {
-  touch0 = {x:e.touches[0].clientX, y:e.touches[0].clientY};
-}, {passive:true});
-canvas.addEventListener('touchmove', e => {
-  if (!touch0) return;
-  camH += (e.touches[0].clientX - touch0.x) * 0.006;
-  camV  = Math.min(1.3, Math.max(0.04, camV + (e.touches[0].clientY - touch0.y)*0.005));
-  touch0 = {x:e.touches[0].clientX, y:e.touches[0].clientY};
-}, {passive:true});
+  // ── オイル層 ──
+  const oilGrad = ctx.createLinearGradient(0, oilBaseY, 0, waterBaseY);
+  oilGrad.addColorStop(0, 'rgba(20,100,40,0.75)');
+  oilGrad.addColorStop(0.4,'rgba(30,130,60,0.7)');
+  oilGrad.addColorStop(0.8,'rgba(20,100,40,0.65)');
+  oilGrad.addColorStop(1, 'rgba(10,60,20,0.8)');
+  const oilPath = buildSurfacePath(oilSurface, oilBaseY, oilAmp);
+  ctx.fillStyle = oilGrad;
+  ctx.fill(oilPath);
 
-// ============================================================
-// UI パラメータ
-// ============================================================
-const P = { wH:1.2, wS:1.0, ch:1.0, fg:0.15, is:1.0 };
-document.getElementById('wH').oninput = e => P.wH = +e.target.value;
-document.getElementById('wS').oninput = e => P.wS = +e.target.value;
-document.getElementById('ch').oninput = e => P.ch = +e.target.value;
-document.getElementById('fg').oninput = e => P.fg = +e.target.value;
-document.getElementById('is').oninput = e => {
-  P.is = +e.target.value;
-  ice  = buildIceberg(42, P.is);
-};
+  // オイル層のテクスチャ（干渉縞）
+  ctx.save();
+  ctx.clip(oilPath);
+  for (let i = 0; i < 5; i++) {
+    const lx = W*(0.1+i*0.2) + Math.sin(time*0.015+i*1.3)*30;
+    const ilg = ctx.createRadialGradient(lx, oilBaseY+20, 0, lx, oilBaseY+20, 60);
+    ilg.addColorStop(0,'rgba(180,255,100,0.08)');
+    ilg.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle = ilg;
+    ctx.fillRect(0, oilBaseY, W, waterBaseY-oilBaseY+50);
+  }
+  ctx.restore();
 
-// ============================================================
-// レンダーループ
-// ============================================================
-function render(ts) {
-  const t = ts * 0.001;
+  // オイルと水の境界（虹色の干渉光）
+  const interfaceY = waterBaseY;
+  const ifGrad = ctx.createLinearGradient(0,0,W,0);
+  for(let i=0;i<=10;i++){
+    const hue = (i*36 + time*0.5) % 360;
+    ifGrad.addColorStop(i/10, `hsla(${hue},100%,70%,0.15)`);
+  }
+  ctx.fillStyle = ifGrad;
+  const interfaceSurf = waterSurface;
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) {
+    const x = (i/(N-1))*W;
+    const y = interfaceY + interfaceSurf[i]*waterAmp;
+    i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+  }
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(200,255,200,0.25)';
+  ctx.stroke();
 
-  gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.clearColor(0.03, 0.07, 0.15, 1.0);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  // ── 空気層（上） ──
+  const airGrad = ctx.createLinearGradient(0,0,0,oilBaseY);
+  airGrad.addColorStop(0,'rgba(220,240,255,0.15)');
+  airGrad.addColorStop(1,'rgba(180,220,255,0.05)');
+  ctx.fillStyle = airGrad;
+  ctx.beginPath();
+  ctx.moveTo(0,0);
+  ctx.lineTo(W,0);
+  for (let i = N-1; i >= 0; i--) {
+    const x = (i/(N-1))*W;
+    const y = oilBaseY + oilSurface[i]*oilAmp;
+    ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+  ctx.fill();
 
-  // カメラ行列
-  const sinH = Math.sin(camH), cosH = Math.cos(camH);
-  const sinV = Math.sin(camV), cosV = Math.cos(camV);
-  const eye  = [sinH*cosV*camDist, sinV*camDist + 1.0, cosH*cosV*camDist];
-  const proj = perspective(0.75, canvas.width / canvas.height, 0.1, 300.0);
-  const view = lookAt(eye, [0, 0.5, 0], [0, 1, 0]);
-  const vp   = mul4(proj, view);
+  // オイル表面のリップル（細かい高周波波）
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) {
+    const x = (i/(N-1))*W;
+    const ripple = Math.sin(i*0.8 + time*0.25)*2*WAVE_INTENSITY
+                 + Math.sin(i*1.3 + time*0.4)*1*WAVE_INTENSITY;
+    const y = oilBaseY + oilSurface[i]*oilAmp + ripple;
+    i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+  }
+  ctx.stroke();
 
-  // ===== SKY =====
-  gl.depthMask(false);
-  gl.disable(gl.DEPTH_TEST);
-  gl.useProgram(progSky);
-  // スカイは平行移動なしのVPを渡す
-  const viewNoT = mat3ToMat4View(view);
-  U.m4(progSky, 'uVP',   mul4(proj, viewNoT));
-  U.f1(progSky, 'uTime', t);
-  gl.bindVertexArray(skyVAO.vao);
-  gl.drawElements(gl.TRIANGLES, skyVAO.count, gl.UNSIGNED_SHORT, 0);
-  gl.depthMask(true);
-  gl.enable(gl.DEPTH_TEST);
+  // ── オブジェ（船・氷山） ──
+  drawObjects(oilBaseY + oilSurface[Math.floor(N*0.28)]*oilAmp,
+              oilBaseY + oilSurface[Math.floor(N*0.58)]*oilAmp);
 
-  // ===== 船 =====
-  gl.useProgram(progObj);
-  U.v3(progObj, 'uCam', eye);
-  U.f1(progObj, 'uFog', P.fg);
+  // ── フレーム枠 ──
+  ctx.strokeStyle = 'rgba(100,180,255,0.4)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(1,1,W-2,H-2,12);
+  ctx.stroke();
 
-  const bobY  = Math.sin(t*0.9)  * 0.09 * P.wH;
-  const tiltZ = Math.sin(t*1.1)  * 0.025 * P.wH;
-  const Mship = mul4(mul4(translate(1.8, bobY, -0.8), rotY(-0.35)), rotZ(tiltZ));
-  U.m4(progObj, 'uMVP',   mul4(vp, Mship));
-  U.m4(progObj, 'uM',     Mship);
-  U.v3(progObj, 'uColor', [0.20, 0.20, 0.22]);
-  U.f1(progObj, 'uMetal', 0.35);
-  U.f1(progObj, 'uRough', 0.65);
-  gl.bindVertexArray(shipVAO.vao);
-  gl.drawElements(gl.TRIANGLES, shipVAO.count, gl.UNSIGNED_SHORT, 0);
+  // フレーム内側ハイライト
+  ctx.strokeStyle = 'rgba(200,240,255,0.1)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(4,4,W-8,H-8,10);
+  ctx.stroke();
 
-  // ===== 氷山 =====
-  const iceY  = Math.sin(t*0.5+1.3) * 0.045 * P.wH;
-  const Mice  = translate(-2.2, -0.28 + iceY, 0.6);
-  U.m4(progObj, 'uMVP',   mul4(vp, Mice));
-  U.m4(progObj, 'uM',     Mice);
-  U.v3(progObj, 'uColor', [0.80, 0.90, 0.96]);
-  U.f1(progObj, 'uMetal', 0.04);
-  U.f1(progObj, 'uRough', 0.28);
-  gl.bindVertexArray(ice.geo.vao);
-  gl.drawElements(gl.TRIANGLES, ice.count, gl.UNSIGNED_SHORT, 0);
-
-  // ===== 海面 =====
-  gl.useProgram(progSea);
-  U.m4(progSea, 'uVP',    vp);
-  U.f1(progSea, 'uTime',  t);
-  U.f1(progSea, 'uWH',    P.wH);
-  U.f1(progSea, 'uWS',    P.wS);
-  U.f1(progSea, 'uChop',  P.ch);
-  U.v3(progSea, 'uCam',   eye);
-  U.f1(progSea, 'uFog',   P.fg);
-  gl.bindVertexArray(oceanVAO.vao);
-  gl.drawElements(gl.TRIANGLES, oceanVAO.count, gl.UNSIGNED_SHORT, 0);
-
-  requestAnimationFrame(render);
+  requestAnimationFrame(draw);
 }
 
-requestAnimationFrame(render);
+draw();
 </script>
 </body>
 </html>
